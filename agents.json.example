@@ -1,0 +1,26 @@
+{
+  "data-uuid-here": {
+    "name": "Data",
+    "color": "#4A90E2"
+  },
+  "vega-uuid-here": {
+    "name": "Vega",
+    "color": "#E74C3C"
+  },
+  "hermes-uuid-here": {
+    "name": "Hermes",
+    "color": "#27AE60"
+  },
+  "tars-uuid-here": {
+    "name": "TARS",
+    "color": "#F39C12"
+  },
+  "mandy-uuid-here": {
+    "name": "Mandy",
+    "color": "#9B59B6"
+  },
+  "spencer-uuid-here": {
+    "name": "Spencer",
+    "color": "#1ABC9C"
+  }
+}
