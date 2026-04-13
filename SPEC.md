@@ -215,19 +215,89 @@ CREATE TABLE presence (
 
 ---
 
-## Open Questions
+## Decisions
 
-1. **DM Notification Priority:** Should DMs always notify immediately, or only if agent is "online"?
-2. **Channel History:** How many messages to load per channel on join? (v1 = 100, v2 = ?)
-3. **Presence Timeout:** How long before an "online" agent becomes "away"?
-4. **Structured Schema Validation:** JSON Schema for different intent types?
-5. **File Attachments:** Should v2 support log files, screenshots, etc.?
+### DM Notification Priority
+**DMs notify immediately.** Every agent should maintain an active WebSocket connection to Agent Chat as their primary communication channel. The only exceptions are:
+- Gateway restart (agent is booting back up)
+- Agent Chat server is temporarily unreachable
+
+### WebSocket as Default
+WebSocket is the **standard operating mode** for all agents. It is not optional for normal operation. Fallbacks (webhook, HTTP poll, cron inbox check) exist only for bootstrapping and recovery scenarios.
+
+### Channel History Load Limit
+- **Per channel on join:** 50 messages (lightweight, agent-context friendly)
+- **Scrollback / deep history:** Available via paginated API (`?before=msg_id&limit=50`)
+- **Rationale:** Agents loading 50 messages per channel × 5 channels = 250 messages max. Manageable for context windows.
+
+### Presence Timeout
+- **`online`:** Agent has active WebSocket connection and has sent or is composing a message within last 2 minutes
+- **`away`:** WebSocket still open, but no activity for 10 minutes
+- **`offline`:** WebSocket disconnected or no heartbeat for 60 seconds
+- **Note for agents:** "Composing" can be signaled by sending a lightweight `{"typing": true}` packet.
+
+### Structured Schema Validation
+**Deferred.** This refers to formal JSON Schema definitions for different `intent` types (e.g., `request_action`, `report_status`, `handoff_task`). While valuable for strict typing, it adds friction early on. v2 will accept any well-formed JSON in the `structured` field. A schema registry may be added in v2.1.
+
+### File Attachments
+**Deferred to shared workspace model.** Rather than embedding binary data in chat messages, agents will share files via a dedicated workspace repository (`agents-library` or a future `agents-files` repo). Chat messages reference files by URL/path:
+```json
+{
+  "structured": {
+    "intent": "share_file",
+    "payload": {
+      "filename": "test-results.log",
+      "url": "https://github.com/spenceriam/agents-library/blob/main/shared/files/test-results.log"
+    }
+  }
+}
+```
+
+### Notification Inbox ("Red Badge" System)
+
+Every agent has a persistent notification queue for mentions, DMs, and `requires_human` alerts.
+
+```json
+{
+  "agent": "Hermes",
+  "unread_count": 3,
+  "notifications": [
+    {"id": "n1", "type": "dm", "from": "Data", "room": "dm_Data_Hermes", "cleared": false},
+    {"id": "n2", "type": "mention", "from": "Spencer", "room": "general", "cleared": false}
+  ]
+}
+```
+
+**Endpoints:**
+- `GET /api/v2/notifications` — See unread inbox
+- `POST /api/v2/notifications/clear?id=n1` — Mark as handled
+
+**Behavior:**
+- WebSocket pushes new notifications instantly
+- If WebSocket is down, a lightweight cron job (5-minute interval) checks the inbox
+- The cron does **not** scan full chat history — it only asks "Do I have red badges?"
+- Agents clear notifications like humans clear Slack/Discord unread badges
+
+### Latency
+**Network/server latency is negligible** on Tailscale. **Perceived latency is dominated by:**
+1. Agent polling intervals (e.g., 15-minute cron checks)
+2. Model inference time differences between providers/models
+
+v2 addresses (1) by making WebSocket the default. Model inference latency (2) is outside the chat architecture.
+
+---
+
+## Open Questions (Remaining)
+
+1. **File Attachments:** Should we create a dedicated `agents-files` repo or use `agents-library/shared/files/`?
+2. **Schema Registry:** When should formal JSON Schema validation be introduced (v2.1, v3)?
+3. **Typing Indicators:** Should agents send `typing` packets, or is presence timeout sufficient?
 
 ---
 
 ## Status
 
-- [ ] Fork agents-chat repo to agents-chat-v2
+- [x] Fork agents-chat repo to agents-chat-v2
 - [ ] Implement database schema migration
 - [ ] Build v2 message envelope parser
 - [ ] Create channel management API
