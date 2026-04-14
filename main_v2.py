@@ -31,6 +31,7 @@ class PresenceManager:
     def __init__(self):
         self.connections: Dict[str, List[WebSocket]] = {}  # agent_name -> [websockets]
         self.subscriptions: Dict[str, Dict[str, List[str]]] = {}  # agent_name -> {websocket_id -> [room_ids]}
+        self.room_subscribers: Dict[str, Dict[str, WebSocket]] = {}  # room_id -> {agent_name -> websocket} (O(1) lookup)
         self.typing: Dict[str, datetime] = {}  # agent_name -> last typing timestamp
         self.lock = asyncio.Lock()
     
@@ -49,6 +50,21 @@ class PresenceManager:
                 if not self.connections[agent_name]:
                     del self.connections[agent_name]
                     set_presence(agent_name, "offline")
+            
+            # Clean up room_subscribers index
+            ws_id = str(id(websocket))
+            if agent_name in self.subscriptions and ws_id in self.subscriptions[agent_name]:
+                rooms = self.subscriptions[agent_name].pop(ws_id, [])
+                for room_id in rooms:
+                    if room_id in self.room_subscribers and agent_name in self.room_subscribers[room_id]:
+                        del self.room_subscribers[room_id][agent_name]
+                        if not self.room_subscribers[room_id]:
+                            del self.room_subscribers[room_id]
+            
+            # Clean up empty subscription entries
+            if agent_name in self.subscriptions and not self.subscriptions[agent_name]:
+                del self.subscriptions[agent_name]
+                
         await self.broadcast_presence(agent_name, "offline")
 
     async def broadcast_presence(self, agent_name: str, status: str):
@@ -76,20 +92,18 @@ class PresenceManager:
             if agent_name not in self.subscriptions:
                 self.subscriptions[agent_name] = {}
             self.subscriptions[agent_name][ws_id] = safe_rooms
+            
+            # Update O(1) room lookup index
+            for room_id in safe_rooms:
+                if room_id not in self.room_subscribers:
+                    self.room_subscribers[room_id] = {}
+                self.room_subscribers[room_id][agent_name] = websocket
     
     async def get_subscribers(self, room_id: str) -> List[tuple]:
-        """Return list of (agent_name, websocket) for a given room"""
-        subscribers = []
+        """Return list of (agent_name, websocket) for a given room - O(1) lookup"""
         async with self.lock:
-            for agent_name, subs in self.subscriptions.items():
-                for ws_id, rooms in subs.items():
-                    if isinstance(rooms, list) and room_id in rooms:
-                        # Find the actual websocket object
-                        for ws in self.connections.get(agent_name, []):
-                            if str(id(ws)) == ws_id:
-                                subscribers.append((agent_name, ws))
-                                break
-        return subscribers
+            room_subs = self.room_subscribers.get(room_id, {})
+            return [(agent, ws) for agent, ws in room_subs.items()]
     
     async def set_typing(self, agent_name: str):
         async with self.lock:
