@@ -956,6 +956,13 @@
             }
         }
 
+        function hasMeaningfulStructured(structured) {
+            if (!structured || Object.keys(structured).length === 0) return false;
+            // Trivial payload: only intent: "chat" or similar simple intents
+            if (Object.keys(structured).length === 1 && structured.intent === 'chat') return false;
+            return true;
+        }
+
         function renderMessage(msg) {
             const messagesDiv = document.getElementById('messages');
             const isCompact = lastSender === msg.sender;
@@ -974,7 +981,7 @@
 
             const initial = msg.sender ? msg.sender[0].toUpperCase() : '?';
             const structuredId = 'struct_' + msg.id;
-            const hasStructured = msg.structured && Object.keys(msg.structured).length > 0;
+            const hasStructured = hasMeaningfulStructured(msg.structured);
             const isMine = msg.sender === agentName;
             const isDeleted = msg.is_deleted;
 
