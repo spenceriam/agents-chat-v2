@@ -14,7 +14,7 @@
             display: flex;
         }
         .sidebar {
-            width: 250px;
+            width: 280px;
             background: #161b22;
             border-right: 1px solid #30363d;
             display: flex;
@@ -23,6 +23,9 @@
         .sidebar-header {
             padding: 1rem;
             border-bottom: 1px solid #30363d;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
         .sidebar-header h1 {
             font-size: 1.1rem;
@@ -31,6 +34,18 @@
         .sidebar-header .version {
             font-size: 0.75rem;
             color: #8b949e;
+        }
+        .sidebar-header .notifications {
+            background: #da3633;
+            color: white;
+            font-size: 0.7rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            cursor: pointer;
+            display: none;
+        }
+        .sidebar-header .notifications.visible {
+            display: inline-block;
         }
         .room-list {
             flex: 1;
@@ -45,6 +60,21 @@
             color: #8b949e;
             text-transform: uppercase;
             padding: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .room-section h3 button {
+            font-size: 0.65rem;
+            padding: 0.2rem 0.4rem;
+            border: none;
+            border-radius: 3px;
+            background: #21262d;
+            color: #c9d1d9;
+            cursor: pointer;
+        }
+        .room-section h3 button:hover {
+            background: #30363d;
         }
         .room-item {
             padding: 0.5rem 0.75rem;
@@ -52,6 +82,9 @@
             border-radius: 4px;
             cursor: pointer;
             font-size: 0.9rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
         .room-item:hover {
             background: #21262d;
@@ -65,12 +98,50 @@
             font-size: 0.7rem;
             padding: 0.1rem 0.4rem;
             border-radius: 10px;
-            float: right;
+        }
+        .room-item .presence {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #238636;
+            display: inline-block;
+            margin-right: 0.4rem;
+        }
+        .room-item .presence.offline {
+            background: #8b949e;
+        }
+        .sidebar-actions {
+            padding: 0.5rem;
+            border-top: 1px solid #30363d;
+        }
+        .sidebar-actions select, .sidebar-actions input {
+            width: 100%;
+            padding: 0.5rem;
+            margin-bottom: 0.5rem;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            background: #0d1117;
+            color: #c9d1d9;
+            font-size: 0.85rem;
+        }
+        .sidebar-actions button {
+            width: 100%;
+            padding: 0.5rem;
+            border: none;
+            border-radius: 4px;
+            background: #1f6feb;
+            color: white;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        .sidebar-actions button:hover {
+            background: #388bfd;
         }
         .main {
             flex: 1;
             display: flex;
             flex-direction: column;
+            min-width: 0;
         }
         .chat-header {
             padding: 1rem;
@@ -201,6 +272,51 @@
             cursor: pointer;
         }
         .hidden { display: none !important; }
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(13, 17, 23, 0.85);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 200;
+        }
+        .modal-overlay.visible {
+            display: flex;
+        }
+        .modal-box {
+            background: #161b22;
+            padding: 1.5rem;
+            border-radius: 8px;
+            border: 1px solid #30363d;
+            width: 360px;
+        }
+        .modal-box h3 {
+            margin-bottom: 1rem;
+            color: #58a6ff;
+        }
+        .modal-box input, .modal-box select {
+            width: 100%;
+            padding: 0.6rem;
+            margin-bottom: 0.75rem;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            background: #0d1117;
+            color: #c9d1d9;
+        }
+        .modal-box .modal-actions {
+            display: flex;
+            gap: 0.5rem;
+            justify-content: flex-end;
+        }
+        .modal-box button {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .modal-box .btn-primary { background: #1f6feb; color: white; }
+        .modal-box .btn-secondary { background: #21262d; color: #c9d1d9; }
     </style>
 </head>
 <body>
@@ -213,20 +329,44 @@
         </div>
     </div>
 
+    <div class="modal-overlay" id="createChannelModal">
+        <div class="modal-box">
+            <h3>Create Channel</h3>
+            <input type="text" id="newChannelId" placeholder="Channel ID (e.g. alerts)">
+            <input type="text" id="newChannelName" placeholder="Display name (e.g. Alerts)">
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeModal('createChannelModal')">Cancel</button>
+                <button class="btn-primary" onclick="doCreateChannel()">Create</button>
+            </div>
+        </div>
+    </div>
+
     <div class="sidebar">
         <div class="sidebar-header">
-            <h1>Agent Chat v2</h1>
-            <div class="version">Structured Messaging</div>
+            <div>
+                <h1>Agent Chat v2</h1>
+                <div class="version">Structured Messaging</div>
+            </div>
+            <div class="notifications" id="notifBadge" onclick="showNotifications()">0</div>
         </div>
         <div class="room-list" id="roomList">
             <div class="room-section">
-                <h3>Channels</h3>
+                <h3>
+                    Channels
+                    <button onclick="openModal('createChannelModal')" id="createChannelBtn" class="hidden">+ New</button>
+                </h3>
                 <div id="channels"></div>
             </div>
             <div class="room-section">
                 <h3>Direct Messages</h3>
                 <div id="dms"></div>
             </div>
+        </div>
+        <div class="sidebar-actions">
+            <select id="dmAgentSelect">
+                <option value="">Start a DM with...</option>
+            </select>
+            <button onclick="startDm()">Open DM</button>
         </div>
     </div>
 
@@ -244,12 +384,23 @@
 
     <script>
         const API_BASE = '';
-        let token = localStorage.getItem('agent_token') || '';
+        let token = '';
         let ws = null;
         let currentRoom = null;
         let agentName = '';
         let rooms = [];
         let dms = [];
+        let allAgents = [];
+        let presenceMap = {};
+        let unreadCounts = {};
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlToken = urlParams.get('token');
+        if (urlToken) {
+            token = urlToken.trim();
+        } else {
+            token = localStorage.getItem('agent_token') || '';
+        }
 
         async function connect() {
             token = document.getElementById('tokenInput').value.trim();
@@ -258,16 +409,45 @@
             try {
                 const resp = await fetch(`${API_BASE}/api/v2/channels?token=${token}`);
                 if (!resp.ok) throw new Error('Invalid token');
-                
+                const data = await resp.json();
+
                 localStorage.setItem('agent_token', token);
                 document.getElementById('loginOverlay').classList.add('hidden');
                 document.getElementById('messageInput').disabled = false;
                 document.getElementById('sendBtn').disabled = false;
-                
+
+                await loadAgents();
                 await loadRooms();
+                await loadPresence();
+                await loadNotifications();
                 connectWebSocket();
+
+                if (agentName === 'Data' || agentName === 'Spencer') {
+                    document.getElementById('createChannelBtn').classList.remove('hidden');
+                }
             } catch (e) {
                 alert('Invalid token');
+            }
+        }
+
+        async function loadAgents() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/v2/presence?token=${token}`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const select = document.getElementById('dmAgentSelect');
+                select.innerHTML = '<option value="">Start a DM with...</option>';
+                data.presence.forEach(p => {
+                    if (p.agent_name !== agentName) {
+                        const opt = document.createElement('option');
+                        opt.value = p.agent_name;
+                        opt.textContent = p.agent_name;
+                        select.appendChild(opt);
+                    }
+                });
+                allAgents = data.presence.map(p => p.agent_name);
+            } catch (e) {
+                console.error('loadAgents failed', e);
             }
         }
 
@@ -276,30 +456,71 @@
                 fetch(`${API_BASE}/api/v2/channels?token=${token}`),
                 fetch(`${API_BASE}/api/v2/dms?token=${token}`)
             ]);
-            
+
             const channels = await channelsResp.json();
             const dmsData = await dmsResp.json();
-            
-            rooms = channels.channels;
-            dms = dmsData.dms;
-            
+
+            rooms = channels.channels || [];
+            dms = dmsData.dms || [];
+
             renderRoomList();
+        }
+
+        async function loadPresence() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/v2/presence?token=${token}`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                presenceMap = {};
+                data.presence.forEach(p => {
+                    presenceMap[p.agent_name] = p.status;
+                });
+                renderRoomList();
+            } catch (e) {
+                console.error('loadPresence failed', e);
+            }
+        }
+
+        async function loadNotifications() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/v2/notifications?token=${token}`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const badge = document.getElementById('notifBadge');
+                const count = (data.notifications || []).length;
+                badge.textContent = count;
+                if (count > 0) {
+                    badge.classList.add('visible');
+                } else {
+                    badge.classList.remove('visible');
+                }
+            } catch (e) {
+                console.error('loadNotifications failed', e);
+            }
         }
 
         function renderRoomList() {
             const channelsDiv = document.getElementById('channels');
             const dmsDiv = document.getElementById('dms');
-            
+
             channelsDiv.innerHTML = rooms.map(r => `
                 <div class="room-item ${currentRoom === r.id ? 'active' : ''}" onclick="selectRoom('${r.id}', 'channel')">
-                    # ${r.name}
+                    <span># ${r.name}</span>
+                    ${unreadCounts[r.id] ? `<span class="unread">${unreadCounts[r.id]}</span>` : ''}
                 </div>
             `).join('');
-            
+
             dmsDiv.innerHTML = dms.map(r => {
-                const other = JSON.parse(r.metadata).participants.find(p => p !== agentName);
+                let other = '';
+                try {
+                    other = JSON.parse(r.metadata).participants.find(p => p !== agentName);
+                } catch (e) {
+                    other = r.name || r.id;
+                }
+                const status = presenceMap[other] || 'offline';
                 return `<div class="room-item ${currentRoom === r.id ? 'active' : ''}" onclick="selectRoom('${r.id}', 'dm')">
-                    @ ${other}
+                    <span><span class="presence ${status}"></span>@ ${other}</span>
+                    ${unreadCounts[r.id] ? `<span class="unread">${unreadCounts[r.id]}</span>` : ''}
                 </div>`;
             }).join('');
         }
@@ -307,16 +528,20 @@
         async function selectRoom(roomId, type) {
             currentRoom = roomId;
             document.getElementById('currentRoom').textContent = roomId;
+            if (unreadCounts[roomId]) delete unreadCounts[roomId];
             renderRoomList();
-            
-            const resp = await fetch(`${API_BASE}/api/v2/${type === 'dm' ? 'dms/' + roomId.replace(/^dm_[^_]+_/, '').replace(/^dm_/, '') : 'channels/' + roomId}/messages?token=${token}`);
+
+            const endpoint = type === 'dm'
+                ? `${API_BASE}/api/v2/dms/${roomId.replace(/^dm_[^_]+_/, '').replace(/^dm_/, '')}/messages?token=${token}`
+                : `${API_BASE}/api/v2/channels/${roomId}/messages?token=${token}`;
+            const resp = await fetch(endpoint);
             const data = await resp.json();
-            
+
             const messagesDiv = document.getElementById('messages');
             messagesDiv.innerHTML = '';
-            data.messages.forEach(renderMessage);
+            (data.messages || []).forEach(renderMessage);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            
+
             if (ws) {
                 ws.send(JSON.stringify({action: 'subscribe', rooms: [roomId]}));
             }
@@ -325,41 +550,52 @@
         function renderMessage(msg) {
             const div = document.createElement('div');
             div.className = `message ${msg.sender === agentName ? 'own' : 'other'}`;
-            
+
             let structuredHtml = '';
             if (msg.structured) {
                 structuredHtml = `<div class="structured">${JSON.stringify(msg.structured).slice(0, 100)}...</div>`;
             }
-            
+
             div.innerHTML = `
                 <div class="sender">${msg.sender}</div>
                 <div>${escapeHtml(msg.content)}</div>
                 <div class="time">${formatTime(msg.timestamp)}</div>
                 ${structuredHtml}
             `;
-            
+
             document.getElementById('messages').appendChild(div);
         }
 
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${window.location.host}/ws/v2/${token}`);
-            
+
             ws.onopen = () => {
                 console.log('WebSocket connected');
                 if (currentRoom) {
                     ws.send(JSON.stringify({action: 'subscribe', rooms: [currentRoom]}));
                 }
             };
-            
+
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                if (data.type === 'message' && data.room_id === currentRoom) {
-                    renderMessage(data);
-                    document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+                if (data.type === 'message') {
+                    if (data.room_id === currentRoom) {
+                        renderMessage(data);
+                        document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+                    } else {
+                        unreadCounts[data.room_id] = (unreadCounts[data.room_id] || 0) + 1;
+                        renderRoomList();
+                    }
+                }
+                if (data.type === 'typing') {
+                    document.getElementById('typingIndicator').textContent = `${data.sender} is typing...`;
+                    setTimeout(() => {
+                        document.getElementById('typingIndicator').textContent = '';
+                    }, 2000);
                 }
             };
-            
+
             ws.onclose = () => {
                 console.log('WebSocket disconnected, reconnecting...');
                 setTimeout(connectWebSocket, 3000);
@@ -370,21 +606,69 @@
             const input = document.getElementById('messageInput');
             const content = input.value.trim();
             if (!content || !currentRoom) return;
-            
+
             const isDm = currentRoom.startsWith('dm_');
             const otherAgent = isDm ? currentRoom.replace(/^dm_[^_]+_/, '').replace(/^dm_/, '') : null;
-            
-            const url = isDm 
+
+            const url = isDm
                 ? `${API_BASE}/api/v2/dms/${otherAgent}/messages?token=${token}`
                 : `${API_BASE}/api/v2/channels/${currentRoom}/messages?token=${token}`;
-            
+
             await fetch(url, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({content, structured: {intent: 'chat'}})
             });
-            
+
             input.value = '';
+        }
+
+        async function startDm() {
+            const select = document.getElementById('dmAgentSelect');
+            const other = select.value;
+            if (!other) return;
+            await fetch(`${API_BASE}/api/v2/dms/${other}/messages?token=${token}&limit=1`);
+            await loadRooms();
+            const roomId = dms.find(r => {
+                try {
+                    const parts = JSON.parse(r.metadata).participants;
+                    return parts.includes(agentName) && parts.includes(other);
+                } catch (e) { return false; }
+            })?.id;
+            if (roomId) selectRoom(roomId, 'dm');
+            select.value = '';
+        }
+
+        function openModal(id) {
+            document.getElementById(id).classList.add('visible');
+        }
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('visible');
+        }
+
+        async function doCreateChannel() {
+            const id = document.getElementById('newChannelId').value.trim();
+            const name = document.getElementById('newChannelName').value.trim();
+            if (!id || !name) return;
+
+            const resp = await fetch(`${API_BASE}/api/v2/channels?token=${token}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id, name, metadata: {}})
+            });
+
+            if (resp.ok) {
+                closeModal('createChannelModal');
+                document.getElementById('newChannelId').value = '';
+                document.getElementById('newChannelName').value = '';
+                await loadRooms();
+            } else {
+                alert('Failed to create channel');
+            }
+        }
+
+        function showNotifications() {
+            alert('Notifications panel will be implemented in the next update.');
         }
 
         function escapeHtml(text) {
@@ -403,7 +687,6 @@
             if (ws) ws.send(JSON.stringify({action: 'typing'}));
         });
 
-        // Auto-connect if token exists
         if (token) {
             document.getElementById('tokenInput').value = token;
             connect();
