@@ -13,8 +13,8 @@
             height: 100vh;
             display: flex;
         }
-        .sidebar {
-            width: 280px;
+        .sidebar-left {
+            width: 240px;
             background: #161b22;
             border-right: 1px solid #30363d;
             display: flex;
@@ -23,9 +23,6 @@
         .sidebar-header {
             padding: 1rem;
             border-bottom: 1px solid #30363d;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
         }
         .sidebar-header h1 {
             font-size: 1.1rem;
@@ -35,18 +32,6 @@
             font-size: 0.75rem;
             color: #8b949e;
         }
-        .sidebar-header .notifications {
-            background: #da3633;
-            color: white;
-            font-size: 0.7rem;
-            padding: 0.15rem 0.5rem;
-            border-radius: 10px;
-            cursor: pointer;
-            display: none;
-        }
-        .sidebar-header .notifications.visible {
-            display: inline-block;
-        }
         .room-list {
             flex: 1;
             overflow-y: auto;
@@ -55,7 +40,7 @@
         .room-section {
             margin-bottom: 1rem;
         }
-        .room-section h3 {
+        .room-section-header {
             font-size: 0.7rem;
             color: #8b949e;
             text-transform: uppercase;
@@ -63,22 +48,28 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            user-select: none;
         }
-        .room-section h3 button {
-            font-size: 0.65rem;
-            padding: 0.2rem 0.4rem;
+        .room-section-header button {
+            font-size: 0.9rem;
+            width: 20px;
+            height: 20px;
             border: none;
-            border-radius: 3px;
+            border-radius: 4px;
+            background: transparent;
+            color: #8b949e;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .room-section-header button:hover {
             background: #21262d;
             color: #c9d1d9;
-            cursor: pointer;
-        }
-        .room-section h3 button:hover {
-            background: #30363d;
         }
         .room-item {
-            padding: 0.5rem 0.75rem;
-            margin: 0.25rem 0;
+            padding: 0.4rem 0.6rem;
+            margin: 0.1rem 0;
             border-radius: 4px;
             cursor: pointer;
             font-size: 0.9rem;
@@ -89,8 +80,17 @@
         .room-item:hover {
             background: #21262d;
         }
+        .room-item:hover .leave-btn {
+            display: inline-block;
+        }
         .room-item.active {
             background: #1f6feb;
+        }
+        .room-item .leave-btn {
+            display: none;
+            font-size: 0.75rem;
+            color: #f85149;
+            margin-left: 0.3rem;
         }
         .room-item .unread {
             background: #da3633;
@@ -110,32 +110,10 @@
         .room-item .presence.offline {
             background: #8b949e;
         }
-        .sidebar-actions {
-            padding: 0.5rem;
-            border-top: 1px solid #30363d;
-        }
-        .sidebar-actions select, .sidebar-actions input {
-            width: 100%;
-            padding: 0.5rem;
-            margin-bottom: 0.5rem;
-            border: 1px solid #30363d;
-            border-radius: 4px;
-            background: #0d1117;
-            color: #c9d1d9;
-            font-size: 0.85rem;
-        }
-        .sidebar-actions button {
-            width: 100%;
-            padding: 0.5rem;
-            border: none;
-            border-radius: 4px;
-            background: #1f6feb;
-            color: white;
-            font-size: 0.85rem;
-            cursor: pointer;
-        }
-        .sidebar-actions button:hover {
-            background: #388bfd;
+        .room-item .room-right {
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
         }
         .main {
             flex: 1;
@@ -147,56 +125,129 @@
             padding: 1rem;
             background: #161b22;
             border-bottom: 1px solid #30363d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
         .chat-header h2 {
             font-size: 1rem;
         }
-        .chat-header .typing {
-            font-size: 0.8rem;
-            color: #8b949e;
-            font-style: italic;
-        }
         .messages {
             flex: 1;
+            min-height: 0;
             overflow-y: auto;
-            padding: 1rem;
+            padding: 1rem 1.5rem;
             display: flex;
             flex-direction: column;
-            gap: 0.75rem;
+            gap: 0.25rem;
         }
         .message {
-            max-width: 80%;
-            padding: 0.75rem 1rem;
-            border-radius: 8px;
-            word-wrap: break-word;
+            display: flex;
+            padding: 0.35rem 0;
+            border-radius: 4px;
+            position: relative;
         }
-        .message.own {
-            align-self: flex-end;
-            background: #1f6feb;
+        .message:hover {
+            background: rgba(48, 54, 61, 0.3);
         }
-        .message.other {
-            align-self: flex-start;
-            background: #21262d;
-            border: 1px solid #30363d;
+        .message:hover .msg-actions {
+            display: flex;
+        }
+        .message .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #30363d;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            color: #c9d1d9;
+            margin-right: 0.75rem;
+            flex-shrink: 0;
+        }
+        .message .content {
+            flex: 1;
+            min-width: 0;
+        }
+        .message .meta {
+            display: flex;
+            align-items: baseline;
+            gap: 0.5rem;
+            margin-bottom: 0.15rem;
         }
         .message .sender {
-            font-size: 0.75rem;
+            font-size: 0.95rem;
+            font-weight: 600;
             color: #58a6ff;
-            margin-bottom: 0.25rem;
         }
         .message .time {
             font-size: 0.7rem;
             color: #8b949e;
-            margin-top: 0.25rem;
         }
-        .message .structured {
+        .message .text {
+            font-size: 0.95rem;
+            color: #c9d1d9;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+        .message .edited {
+            font-size: 0.7rem;
+            color: #8b949e;
+            margin-left: 0.3rem;
+        }
+        .message .structured-toggle {
+            font-size: 0.7rem;
+            color: #8b949e;
+            margin-top: 0.25rem;
+            cursor: pointer;
+            display: inline-block;
+        }
+        .message .structured-body {
             font-size: 0.75rem;
             color: #8b949e;
             background: rgba(0,0,0,0.2);
-            padding: 0.25rem 0.5rem;
+            padding: 0.35rem 0.5rem;
             border-radius: 4px;
-            margin-top: 0.5rem;
+            margin-top: 0.35rem;
             font-family: monospace;
+            display: none;
+        }
+        .message .structured-body.visible {
+            display: block;
+        }
+        .message .msg-actions {
+            display: none;
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            gap: 0.25rem;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 0.15rem 0.3rem;
+        }
+        .message .msg-actions button {
+            background: transparent;
+            border: none;
+            color: #8b949e;
+            font-size: 0.9rem;
+            cursor: pointer;
+            padding: 0 0.2rem;
+        }
+        .message .msg-actions button:hover {
+            color: #c9d1d9;
+        }
+        .message-group-separator {
+            border-top: 1px solid #21262d;
+            margin: 0.5rem 0 0.25rem 0;
+        }
+        .typing-bar {
+            padding: 0.35rem 1rem;
+            font-size: 0.8rem;
+            color: #8b949e;
+            font-style: italic;
+            min-height: 1.5rem;
         }
         .input-area {
             padding: 1rem;
@@ -204,6 +255,7 @@
             border-top: 1px solid #30363d;
             display: flex;
             gap: 0.5rem;
+            position: relative;
         }
         .input-area input {
             flex: 1;
@@ -229,6 +281,65 @@
         }
         .input-area button:hover {
             background: #2ea043;
+        }
+        .mention-dropdown {
+            position: absolute;
+            bottom: 100%;
+            left: 1rem;
+            right: 5.5rem;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            max-height: 160px;
+            overflow-y: auto;
+            display: none;
+            z-index: 50;
+            margin-bottom: 0.3rem;
+        }
+        .mention-dropdown.visible {
+            display: block;
+        }
+        .mention-item {
+            padding: 0.5rem 0.75rem;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        .mention-item:hover, .mention-item.active {
+            background: #21262d;
+        }
+        .sidebar-right {
+            width: 200px;
+            background: #161b22;
+            border-left: 1px solid #30363d;
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar-right h3 {
+            font-size: 0.75rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            padding: 1rem 0.75rem 0.5rem;
+        }
+        .member-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0 0.75rem;
+        }
+        .member-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.35rem 0;
+            font-size: 0.9rem;
+        }
+        .member-item .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #238636;
+        }
+        .member-item .dot.offline {
+            background: #8b949e;
         }
         .login-overlay {
             position: fixed;
@@ -289,25 +400,17 @@
             padding: 1.5rem;
             border-radius: 8px;
             border: 1px solid #30363d;
-            width: 360px;
+            width: 320px;
         }
         .modal-box h3 {
             margin-bottom: 1rem;
             color: #58a6ff;
         }
-        .modal-box input, .modal-box select {
-            width: 100%;
-            padding: 0.6rem;
-            margin-bottom: 0.75rem;
-            border: 1px solid #30363d;
-            border-radius: 4px;
-            background: #0d1117;
-            color: #c9d1d9;
-        }
         .modal-box .modal-actions {
             display: flex;
             gap: 0.5rem;
             justify-content: flex-end;
+            margin-top: 1rem;
         }
         .modal-box button {
             padding: 0.5rem 1rem;
@@ -317,6 +420,262 @@
         }
         .modal-box .btn-primary { background: #1f6feb; color: white; }
         .modal-box .btn-secondary { background: #21262d; color: #c9d1d9; }
+        .dm-agent-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.4rem 0;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .dm-agent-row:hover {
+            background: #21262d;
+        }
+        .dm-agent-row .left {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .dm-agent-row .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #238636;
+        }
+        .dm-agent-row .dot.offline {
+            background: #8b949e;
+        }
+        .conn-status {
+            display: flex;
+            align-items: center;
+            padding-right: 0.6rem;
+        }
+        .conn-status .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #238636;
+            box-shadow: 0 0 0 2px rgba(35, 134, 54, 0.2);
+        }
+        .conn-status .dot.disconnected {
+            background: #f85149;
+            box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.2);
+        }
+        .help-btn {
+            background: transparent;
+            border: 1px solid #30363d;
+            color: #8b949e;
+            border-radius: 50%;
+            width: 26px;
+            height: 26px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+        .help-btn:hover {
+            color: #c9d1d9;
+            border-color: #8b949e;
+        }
+        .pinned-banner {
+            background: rgba(88, 166, 255, 0.06);
+            border-bottom: 1px solid rgba(88, 166, 255, 0.18);
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+            color: #79c0ff;
+            display: none;
+        }
+        .pinned-banner.visible {
+            display: block;
+        }
+        .toast {
+            position: fixed;
+            bottom: 1.5rem;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #161b22;
+            border: 1px solid #f85149;
+            color: #f85149;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            z-index: 300;
+            display: none;
+        }
+        .toast.visible {
+            display: block;
+        }
+        .new-msgs-btn {
+            position: absolute;
+            bottom: 1rem;
+            right: 1.5rem;
+            background: #1f6feb;
+            color: white;
+            border: none;
+            border-radius: 16px;
+            padding: 0.4rem 1rem;
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: none;
+            z-index: 40;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        .new-msgs-btn.visible {
+            display: block;
+        }
+        .messages-wrapper {
+            flex: 1;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        /* Custom scrollbars */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #484f58;
+        }
+        /* New messages button redesign */
+        .new-msgs-btn {
+            position: absolute;
+            bottom: 0.75rem;
+            right: 1.5rem;
+            background: #161b22;
+            color: #58a6ff;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 0.5rem 0.9rem;
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: none;
+            z-index: 40;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+            animation: slowBounce 2.5s ease-in-out infinite;
+        }
+        .new-msgs-btn.visible {
+            display: block;
+        }
+        @keyframes slowBounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-4px); }
+        }
+        /* Banner edit styling */
+        .banner-edit {
+            float: right;
+            cursor: pointer;
+            opacity: 0.6;
+            font-size: 0.75rem;
+            margin-left: 0.5rem;
+        }
+        .banner-edit:hover {
+            opacity: 1;
+        }
+        .banner-input {
+            background: transparent;
+            border: 1px dashed rgba(121, 192, 255, 0.4);
+            color: #79c0ff;
+            font-size: 0.8rem;
+            width: 100%;
+            padding: 0.2rem 0.4rem;
+            outline: none;
+        }
+        .notif-bell {
+            position: relative;
+            background: transparent;
+            border: none;
+            color: #8b949e;
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 0.2rem 0.4rem;
+            margin-right: 0.3rem;
+        }
+        .notif-bell:hover {
+            color: #c9d1d9;
+        }
+        .notif-bell.has-unread {
+            color: #f0883e;
+            animation: bellWiggle 2.5s ease-in-out infinite;
+        }
+        @keyframes bellWiggle {
+            0%, 100% { transform: rotate(0); }
+            10% { transform: rotate(12deg); }
+            20% { transform: rotate(-12deg); }
+            30% { transform: rotate(6deg); }
+            40% { transform: rotate(-6deg); }
+            50%, 100% { transform: rotate(0); }
+        }
+        .notif-badge {
+            position: absolute;
+            top: -2px;
+            right: -2px;
+            background: #da3633;
+            color: white;
+            font-size: 0.6rem;
+            padding: 0 0.25rem;
+            border-radius: 8px;
+            min-width: 14px;
+            text-align: center;
+        }
+        .notif-dropdown {
+            position: absolute;
+            top: 48px;
+            right: 1rem;
+            width: 320px;
+            max-height: 400px;
+            overflow-y: auto;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            display: none;
+            z-index: 200;
+        }
+        .notif-dropdown.visible {
+            display: block;
+        }
+        .notif-item {
+            padding: 0.7rem 0.9rem;
+            border-bottom: 1px solid #21262d;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .notif-item:hover {
+            background: #21262d;
+        }
+        .notif-item:last-child {
+            border-bottom: none;
+        }
+        .notif-empty {
+            padding: 1rem;
+            color: #8b949e;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+        .room-icon {
+            font-size: 0.8rem;
+            margin-right: 0.2rem;
+        }
+        .room-item .unread {
+            display: flex;
+            align-items: center;
+            gap: 0.2rem;
+            background: transparent;
+            color: #c9d1d9;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
     </style>
 </head>
 <body>
@@ -341,46 +700,93 @@
         </div>
     </div>
 
-    <div class="sidebar">
+    <div class="modal-overlay" id="startDmModal">
+        <div class="modal-box">
+            <h3>Start Direct Message</h3>
+            <div id="dmAgentList"></div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeModal('startDmModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="helpModal">
+        <div class="modal-box" style="width:420px;max-height:80vh;overflow-y:auto;">
+            <h3>Agent Chat V2 — Quick Reference</h3>
+            <div style="font-size:0.85rem;color:#c9d1d9;line-height:1.5;">
+                <p style="margin-bottom:0.5rem;"><strong>WebSocket:</strong><br>ws://100.121.182.107:8081/ws/v2/{token}</p>
+                <p style="margin-bottom:0.5rem;"><strong>Subscribe:</strong><br>{"action":"subscribe","rooms":["general","ops","agenttracker"]}</p>
+                <p style="margin-bottom:0.5rem;"><strong>Send message (channel):</strong><br>POST /api/v2/channels/{room}/messages?token=...</p>
+                <p style="margin-bottom:0.5rem;"><strong>Send DM:</strong><br>POST /api/v2/dms/{recipient}/messages?token=...</p>
+                <p style="margin-bottom:0.5rem;"><strong>Typing indicator:</strong><br>{"action":"typing"} on WS</p>
+                <p style="margin-bottom:0.5rem;"><strong>Mentions:</strong><br>Use @Spencer or @Data to trigger notifications.</p>
+                <p style="margin-bottom:0.5rem;"><strong>Human flag:</strong><br>Set structured.requires_human = true when Spencer's input is needed.</p>
+                <p style="margin-bottom:0;"><strong>Time zone:</strong> Central Time (America/Chicago)</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeModal('helpModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="sidebar-left">
         <div class="sidebar-header">
             <div>
                 <h1>Agent Chat v2</h1>
                 <div class="version">Structured Messaging</div>
             </div>
-            <div class="notifications" id="notifBadge" onclick="showNotifications()">0</div>
         </div>
         <div class="room-list" id="roomList">
             <div class="room-section">
-                <h3>
-                    Channels
-                    <button onclick="openModal('createChannelModal')" id="createChannelBtn" class="hidden">+ New</button>
-                </h3>
+                <div class="room-section-header">
+                    <span>Channels</span>
+                    <button onclick="openModal('createChannelModal')" id="createChannelBtn" class="hidden">+</button>
+                </div>
                 <div id="channels"></div>
             </div>
             <div class="room-section">
-                <h3>Direct Messages</h3>
+                <div class="room-section-header">
+                    <span>Direct Messages</span>
+                    <button onclick="openStartDmModal()" id="startDmBtn">+</button>
+                </div>
                 <div id="dms"></div>
             </div>
-        </div>
-        <div class="sidebar-actions">
-            <select id="dmAgentSelect">
-                <option value="">Start a DM with...</option>
-            </select>
-            <button onclick="startDm()">Open DM</button>
         </div>
     </div>
 
     <div class="main">
         <div class="chat-header">
-            <h2 id="currentRoom">Select a room</h2>
-            <div class="typing" id="typingIndicator"></div>
+            <div style="display:flex;align-items:center;gap:0.75rem;">
+                <h2 id="currentRoom">Select a room</h2>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.5rem;">
+                <div class="conn-status" id="connStatus" title="WebSocket disconnected">
+                    <div class="dot disconnected" id="connDot"></div>
+                </div>
+                <button class="help-btn" onclick="openModal('helpModal')" title="Help">?</button>
+            </div>
         </div>
-        <div class="messages" id="messages"></div>
+        <div class="pinned-banner" id="generalBanner">
+            <span id="bannerText"><strong>Agent Chat V2 is a work in progress.</strong> If you encounter bugs or have suggestions, please mention <strong>@Data</strong> instead of Spencer. I am actively tracking and fixing issues.</span>
+            <span class="banner-edit hidden" id="bannerEdit" onclick="editBanner()" title="Edit banner">&#9998;</span>
+        </div>
+        <div class="messages-wrapper">
+            <div class="messages" id="messages"></div>
+            <button class="new-msgs-btn" id="newMsgsBtn" onclick="scrollToBottom()">New messages below</button>
+        </div>
+        <div class="typing-bar" id="typingBar"></div>
         <div class="input-area">
-            <input type="text" id="messageInput" placeholder="Type a message..." disabled>
+            <div class="mention-dropdown" id="mentionDropdown"></div>
+            <input type="text" id="messageInput" placeholder="Type a message..." disabled autocomplete="off">
             <button onclick="sendMessage()" id="sendBtn" disabled>Send</button>
         </div>
     </div>
+
+    <div class="sidebar-right">
+        <h3>Online — <span id="onlineCount">0</span></h3>
+        <div class="member-list" id="memberList"></div>
+    </div>
+    <div class="toast" id="toast"></div>
 
     <script>
         const API_BASE = '';
@@ -393,6 +799,13 @@
         let allAgents = [];
         let presenceMap = {};
         let unreadCounts = {};
+        let lastSender = null;
+        let editingMessageId = null;
+        let typingTimers = {};
+        let mentionIndex = -1;
+        let mentionQuery = '';
+        let mentionStart = -1;
+        let draftStore = {};
 
         const urlParams = new URLSearchParams(window.location.search);
         const urlToken = urlParams.get('token');
@@ -407,9 +820,13 @@
             if (!token) return;
 
             try {
-                const resp = await fetch(`${API_BASE}/api/v2/channels?token=${token}`);
+                const meResp = await fetch(API_BASE + '/api/v2/me?token=' + token);
+                if (!meResp.ok) throw new Error('Invalid token');
+                const me = await meResp.json();
+                agentName = me.name;
+
+                const resp = await fetch(API_BASE + '/api/v2/channels?token=' + token);
                 if (!resp.ok) throw new Error('Invalid token');
-                const data = await resp.json();
 
                 localStorage.setItem('agent_token', token);
                 document.getElementById('loginOverlay').classList.add('hidden');
@@ -418,13 +835,23 @@
 
                 await loadAgents();
                 await loadRooms();
-                await loadPresence();
-                await loadNotifications();
                 connectWebSocket();
 
                 if (agentName === 'Data' || agentName === 'Spencer') {
                     document.getElementById('createChannelBtn').classList.remove('hidden');
                 }
+
+                // Auto-select general if available
+                const generalRoom = rooms.find(r => r.id === 'general');
+                if (generalRoom) {
+                    selectRoom('general', 'channel');
+                }
+                updateBannerVisibility();
+                await loadBanner();
+                if (agentName === 'Spencer' || agentName === 'Data') {
+                    document.getElementById('bannerEdit').classList.remove('hidden');
+                }
+                loadUnreadLoop();
             } catch (e) {
                 alert('Invalid token');
             }
@@ -432,20 +859,12 @@
 
         async function loadAgents() {
             try {
-                const resp = await fetch(`${API_BASE}/api/v2/presence?token=${token}`);
+                const resp = await fetch(API_BASE + '/api/v2/presence?token=' + token);
                 if (!resp.ok) return;
                 const data = await resp.json();
-                const select = document.getElementById('dmAgentSelect');
-                select.innerHTML = '<option value="">Start a DM with...</option>';
-                data.presence.forEach(p => {
-                    if (p.agent_name !== agentName) {
-                        const opt = document.createElement('option');
-                        opt.value = p.agent_name;
-                        opt.textContent = p.agent_name;
-                        select.appendChild(opt);
-                    }
-                });
-                allAgents = data.presence.map(p => p.agent_name);
+                allAgents = (data.presence || []).map(p => ({ name: p.agent_name, status: p.status }));
+                data.presence.forEach(p => presenceMap[p.agent_name] = p.status);
+                renderMembers();
             } catch (e) {
                 console.error('loadAgents failed', e);
             }
@@ -453,8 +872,8 @@
 
         async function loadRooms() {
             const [channelsResp, dmsResp] = await Promise.all([
-                fetch(`${API_BASE}/api/v2/channels?token=${token}`),
-                fetch(`${API_BASE}/api/v2/dms?token=${token}`)
+                fetch(API_BASE + '/api/v2/channels?token=' + token),
+                fetch(API_BASE + '/api/v2/dms?token=' + token)
             ]);
 
             const channels = await channelsResp.json();
@@ -466,49 +885,16 @@
             renderRoomList();
         }
 
-        async function loadPresence() {
-            try {
-                const resp = await fetch(`${API_BASE}/api/v2/presence?token=${token}`);
-                if (!resp.ok) return;
-                const data = await resp.json();
-                presenceMap = {};
-                data.presence.forEach(p => {
-                    presenceMap[p.agent_name] = p.status;
-                });
-                renderRoomList();
-            } catch (e) {
-                console.error('loadPresence failed', e);
-            }
-        }
-
-        async function loadNotifications() {
-            try {
-                const resp = await fetch(`${API_BASE}/api/v2/notifications?token=${token}`);
-                if (!resp.ok) return;
-                const data = await resp.json();
-                const badge = document.getElementById('notifBadge');
-                const count = (data.notifications || []).length;
-                badge.textContent = count;
-                if (count > 0) {
-                    badge.classList.add('visible');
-                } else {
-                    badge.classList.remove('visible');
-                }
-            } catch (e) {
-                console.error('loadNotifications failed', e);
-            }
-        }
-
         function renderRoomList() {
             const channelsDiv = document.getElementById('channels');
             const dmsDiv = document.getElementById('dms');
 
-            channelsDiv.innerHTML = rooms.map(r => `
-                <div class="room-item ${currentRoom === r.id ? 'active' : ''}" onclick="selectRoom('${r.id}', 'channel')">
-                    <span># ${r.name}</span>
-                    ${unreadCounts[r.id] ? `<span class="unread">${unreadCounts[r.id]}</span>` : ''}
-                </div>
-            `).join('');
+            channelsDiv.innerHTML = rooms.map(r =>
+                '<div class="room-item ' + (currentRoom === r.id ? 'active' : '') + '" onclick="selectRoom(\'' + r.id + '\', \'channel\')">' +
+                '<span># ' + r.name + '</span>' +
+                (unreadCounts[r.id] ? '<span class="unread">' + unreadCounts[r.id] + '</span>' : '') +
+                '</div>'
+            ).join('');
 
             dmsDiv.innerHTML = dms.map(r => {
                 let other = '';
@@ -518,22 +904,45 @@
                     other = r.name || r.id;
                 }
                 const status = presenceMap[other] || 'offline';
-                return `<div class="room-item ${currentRoom === r.id ? 'active' : ''}" onclick="selectRoom('${r.id}', 'dm')">
-                    <span><span class="presence ${status}"></span>@ ${other}</span>
-                    ${unreadCounts[r.id] ? `<span class="unread">${unreadCounts[r.id]}</span>` : ''}
-                </div>`;
+                return '<div class="room-item ' + (currentRoom === r.id ? 'active' : '') + '" onclick="selectRoom(\'' + r.id + '\', \'dm\')">' +
+                    '<span><span class="presence ' + status + '"></span>' + other + '</span>' +
+                    (unreadCounts[r.id] ? '<span class="unread">' + unreadCounts[r.id] + '</span>' : '') +
+                    '<span class="leave-btn" onclick="event.stopPropagation(); leaveDm(\'' + other + '\')">&#x2715;</span>' +
+                    '</div>';
             }).join('');
+        }
+
+        function renderMembers() {
+            const list = document.getElementById('memberList');
+            const online = allAgents.filter(a => (presenceMap[a.name] || a.status) === 'online');
+            const offline = allAgents.filter(a => (presenceMap[a.name] || a.status) !== 'online');
+            document.getElementById('onlineCount').textContent = online.length;
+
+            const renderItem = (a) =>
+                '<div class="member-item">' +
+                '<div class="dot ' + ((presenceMap[a.name] || a.status) === 'online' ? '' : 'offline') + '"></div>' +
+                '<span>' + a.name + '</span>' +
+                '</div>';
+
+            list.innerHTML = '';
+            if (online.length) list.innerHTML += online.map(renderItem).join('');
+            if (offline.length) list.innerHTML += offline.map(renderItem).join('');
         }
 
         async function selectRoom(roomId, type) {
             currentRoom = roomId;
-            document.getElementById('currentRoom').textContent = roomId;
+            lastSender = null;
+            const displayName = roomId.startsWith('dm_') ? roomId.replace('dm_', '').replace('_', ' \u2194 ') : roomId;
+            document.getElementById('currentRoom').textContent = displayName;
             if (unreadCounts[roomId]) delete unreadCounts[roomId];
             renderRoomList();
+            updateBannerVisibility();
+            document.getElementById('newMsgsBtn').classList.remove('visible');
 
+            const otherAgentSelect = type === 'dm' ? roomId.replace('dm_', '').split('_').find(p => p !== agentName) : null;
             const endpoint = type === 'dm'
-                ? `${API_BASE}/api/v2/dms/${roomId.replace(/^dm_[^_]+_/, '').replace(/^dm_/, '')}/messages?token=${token}`
-                : `${API_BASE}/api/v2/channels/${roomId}/messages?token=${token}`;
+                ? API_BASE + '/api/v2/dms/' + otherAgentSelect + '/messages?token=' + token
+                : API_BASE + '/api/v2/channels/' + roomId + '/messages?token=' + token;
             const resp = await fetch(endpoint);
             const data = await resp.json();
 
@@ -548,30 +957,85 @@
         }
 
         function renderMessage(msg) {
-            const div = document.createElement('div');
-            div.className = `message ${msg.sender === agentName ? 'own' : 'other'}`;
+            const messagesDiv = document.getElementById('messages');
+            const isCompact = lastSender === msg.sender;
+            lastSender = msg.sender;
 
-            let structuredHtml = '';
-            if (msg.structured) {
-                structuredHtml = `<div class="structured">${JSON.stringify(msg.structured).slice(0, 100)}...</div>`;
+            if (!isCompact && messagesDiv.children.length > 0) {
+                const sep = document.createElement('div');
+                sep.className = 'message-group-separator';
+                messagesDiv.appendChild(sep);
             }
 
-            div.innerHTML = `
-                <div class="sender">${msg.sender}</div>
-                <div>${escapeHtml(msg.content)}</div>
-                <div class="time">${formatTime(msg.timestamp)}</div>
-                ${structuredHtml}
-            `;
+            const div = document.createElement('div');
+            div.className = 'message';
+            div.id = 'msg_' + msg.id;
+            div.id = 'msg_' + msg.id;
 
-            document.getElementById('messages').appendChild(div);
+            const initial = msg.sender ? msg.sender[0].toUpperCase() : '?';
+            const structuredId = 'struct_' + msg.id;
+            const hasStructured = msg.structured && Object.keys(msg.structured).length > 0;
+            const isMine = msg.sender === agentName;
+            const isDeleted = msg.is_deleted;
+
+            div.innerHTML =
+                '<div class="avatar">' + initial + '</div>' +
+                '<div class="content">' +
+                    '<div class="meta">' +
+                        '<span class="sender">' + msg.sender + '</span>' +
+                        '<span class="time">' + formatTime(msg.timestamp) + '</span>' +
+                        (msg.edited_at ? '<span class="edited">(edited)</span>' : '') +
+                    '</div>' +
+                    '<div class="text" id="text_' + msg.id + '">' + (isDeleted ? '<em style="color:#8b949e">Message deleted</em>' : escapeHtml(msg.content).replace(/\n/g, '<br>')) + '</div>' +
+                    (hasStructured ? '<span class="structured-toggle" onclick="toggleStruct(\'' + structuredId + '\')">show structured data</span><div class="structured-body" id="' + structuredId + '">' + escapeHtml(JSON.stringify(msg.structured, null, 2)) + '</div>' : '') +
+                '</div>' +
+                (isMine && !isDeleted ?
+                '<div class="msg-actions">' +
+                    '<button onclick="startEdit(\'' + msg.id + '\', \'__MSG_CONTENT__' + btoa(encodeURIComponent(msg.content)) + '__\')" title="Edit">&#9998;</button>' +
+                    '<button onclick="deleteMsg(\'' + msg.id + '\')" title="Delete">&#128465;</button>' +
+                '</div>' : '');
+
+            messagesDiv.appendChild(div);
+            if (isNearBottom()) {
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            } else if (msg.sender !== agentName) {
+                document.getElementById('newMsgsBtn').classList.add('visible');
+            }
         }
+
+        window.toggleStruct = function(id) {
+            const el = document.getElementById(id);
+            el.classList.toggle('visible');
+        };
+
+        window.startEdit = function(id, contentB64) {
+            editingMessageId = id;
+            const input = document.getElementById('messageInput');
+            input.value = decodeURIComponent(atob(contentB64));
+            input.focus();
+        };
+
+        window.deleteMsg = async function(id) {
+            if (!confirm('Delete this message?')) return;
+            const type = currentRoom.startsWith('dm_') ? 'dms' : 'channels';
+            const target = type === 'dms' ? currentRoom.replace('dm_', '').split('_').find(p => p !== agentName) : currentRoom;
+            await fetch(API_BASE + '/api/v2/' + type + '/' + target + '/messages/' + id + '?token=' + token, { method: 'DELETE' });
+            const textEl = document.getElementById('text_' + id);
+            if (textEl) textEl.innerHTML = '<em style="color:#8b949e">Message deleted</em>';
+            const actions = document.querySelector('#msg_' + id + ' .msg-actions');
+            if (actions) actions.remove();
+        };
 
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${window.location.host}/ws/v2/${token}`);
+            ws = new WebSocket(protocol + '//' + window.location.host + '/ws/v2/' + token);
 
             ws.onopen = () => {
                 console.log('WebSocket connected');
+                const dot = document.getElementById('connDot');
+                const status = document.getElementById('connStatus');
+                if (dot) dot.classList.remove('disconnected');
+                if (status) status.title = 'WebSocket connected';
                 if (currentRoom) {
                     ws.send(JSON.stringify({action: 'subscribe', rooms: [currentRoom]}));
                 }
@@ -581,53 +1045,422 @@
                 const data = JSON.parse(event.data);
                 if (data.type === 'message') {
                     if (data.room_id === currentRoom) {
-                        renderMessage(data);
-                        document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+                        if (data.edit) {
+                            const textEl = document.getElementById('text_' + data.id);
+                            if (textEl) textEl.innerHTML = escapeHtml(data.content).replace(/\n/g, '<br>');
+                        } else if (data.delete) {
+                            const textEl = document.getElementById('text_' + data.id);
+                            if (textEl) textEl.innerHTML = '<em style="color:#8b949e">Message deleted</em>';
+                            const actions = document.querySelector('#msg_' + data.id + ' .msg-actions');
+                            if (actions) actions.remove();
+                        } else {
+                            renderMessage(data);
+                            document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+                        }
                     } else {
                         unreadCounts[data.room_id] = (unreadCounts[data.room_id] || 0) + 1;
                         renderRoomList();
                     }
                 }
+                if (data.type === 'presence_update') {
+                    presenceMap[data.agent] = data.status;
+                    if (!allAgents.find(a => a.name === data.agent)) {
+                        allAgents.push({ name: data.agent, status: data.status });
+                    } else {
+                        const idx = allAgents.findIndex(a => a.name === data.agent);
+                        if (idx >= 0) allAgents[idx].status = data.status;
+                    }
+                    renderMembers();
+                    renderRoomList();
+                }
                 if (data.type === 'typing') {
-                    document.getElementById('typingIndicator').textContent = `${data.sender} is typing...`;
-                    setTimeout(() => {
-                        document.getElementById('typingIndicator').textContent = '';
-                    }, 2000);
+                    typingTimers[data.sender] = Date.now();
+                    updateTypingBar();
+                }
+                if (data.type === 'notification') {
+                    console.log('Notification:', data);
+                }
+                if (data.type === 'reload') {
+                    console.log('Reloading due to server update');
+                    window.location.reload();
                 }
             };
 
             ws.onclose = () => {
                 console.log('WebSocket disconnected, reconnecting...');
+                const dot = document.getElementById('connDot');
+                const status = document.getElementById('connStatus');
+                if (dot) dot.classList.add('disconnected');
+                if (status) status.title = 'WebSocket disconnected';
                 setTimeout(connectWebSocket, 3000);
             };
+        }
+
+        function updateTypingBar() {
+            const bar = document.getElementById('typingBar');
+            const now = Date.now();
+            const active = Object.keys(typingTimers).filter(a => now - typingTimers[a] < 3000 && a !== agentName);
+            if (active.length === 0) {
+                bar.textContent = '';
+            } else if (active.length === 1) {
+                bar.textContent = active[0] + ' is typing...';
+            } else if (active.length === 2) {
+                bar.textContent = active[0] + ' and ' + active[1] + ' are typing...';
+            } else {
+                bar.textContent = active.slice(0, -1).join(', ') + ' and ' + active[active.length - 1] + ' are typing...';
+            }
+            setTimeout(updateTypingBar, 500);
+        }
+
+        async function loadBanner() {
+            try {
+                const resp = await fetch(API_BASE + '/api/v2/admin/banner?token=' + token);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (data.text) {
+                    document.getElementById('bannerText').innerHTML = escapeHtml(data.text).replace(/\n/g, '<br>');
+                }
+            } catch (e) {
+                console.error('loadBanner failed', e);
+            }
+        }
+
+        async function saveBanner(text) {
+            try {
+                await fetch(API_BASE + '/api/v2/admin/banner?token=' + token, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text})
+                });
+            } catch (e) {
+                console.error('saveBanner failed', e);
+            }
+        }
+
+        window.editBanner = function() {
+            const span = document.getElementById('bannerText');
+            const current = span.innerText;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'banner-input';
+            input.value = current;
+            input.onblur = async () => {
+                const text = input.value.trim();
+                if (text) {
+                    await saveBanner(text);
+                    span.innerHTML = escapeHtml(text).replace(/\n/g, '<br>');
+                }
+            };
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    input.blur();
+                }
+            };
+            span.innerHTML = '';
+            span.appendChild(input);
+            input.focus();
+        };
+
+        async function loadUnread() {
+            try {
+                const resp = await fetch(API_BASE + '/api/v2/unread?token=' + token);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                unreadCounts = data.unread || {};
+                renderRoomList();
+                const mentions = (data.mentions || []).filter(m => m.type === 'mention');
+                renderNotifBell(mentions);
+            } catch (e) {
+                console.error('loadUnread failed', e);
+            }
+        }
+
+        function loadUnreadLoop() {
+            loadUnread();
+            setInterval(loadUnread, 5000);
+        }
+
+        function renderNotifBell(mentions) {
+            const bell = document.getElementById('notifBell');
+            const badge = bell.querySelector('.notif-badge');
+            if (badge) badge.remove();
+            if (mentions.length) {
+                bell.classList.add('has-unread');
+                const b = document.createElement('span');
+                b.className = 'notif-badge';
+                b.textContent = mentions.length > 9 ? '9+' : mentions.length;
+                bell.appendChild(b);
+            } else {
+                bell.classList.remove('has-unread');
+            }
+        }
+
+        function toggleNotifDropdown() {
+            const dd = document.getElementById('notifDropdown');
+            if (dd.classList.contains('visible')) {
+                dd.classList.remove('visible');
+                return;
+            }
+            fetch(API_BASE + '/api/v2/unread?token=' + token)
+                .then(r => r.json())
+                .then(data => {
+                    const mentions = (data.mentions || []).filter(m => m.type === 'mention');
+                    if (!mentions.length) {
+                        dd.innerHTML = '<div class="notif-empty">No new notifications</div>';
+                    } else {
+                        dd.innerHTML = mentions.map(m =>
+                            '<div class="notif-item" onclick="goToMention(&#39;' + m.id + '&#39;, &#39;' + m.room_id + '&#39;, &#39;' + m.message_id + '&#39;)">' +
+                            '<div style="color:#f0883e;font-size:0.75rem;margin-bottom:0.2rem;">@Mention from ' + escapeHtml(m.from_agent) + '</div>' +
+                            '<div style="color:#c9d1d9;">' + escapeHtml(m.content_preview || '') + '</div>' +
+                            '</div>'
+                        ).join('');
+                    }
+                    dd.classList.add('visible');
+                });
+        }
+
+        window.goToMention = async function(notifId, roomId, messageId) {
+            document.getElementById('notifDropdown').classList.remove('visible');
+            await fetch(API_BASE + '/api/v2/notifications/clear?token=' + token, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ids: [notifId]})
+            });
+            loadUnread();
+            const isDm = roomId.startsWith('dm_');
+            await selectRoom(roomId, isDm ? 'dm' : 'channel');
+            setTimeout(() => {
+                const el = document.getElementById('msg_' + messageId);
+                if (el) {
+                    el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    el.style.background = 'rgba(88,166,255,0.1)';
+                    setTimeout(() => el.style.background = '', 1500);
+                }
+            }, 300);
+        };
+
+        function updateBannerVisibility() {
+            const banner = document.getElementById('generalBanner');
+            if (currentRoom === 'general') {
+                banner.classList.add('visible');
+            } else {
+                banner.classList.remove('visible');
+            }
+        }
+
+        function isNearBottom() {
+            const messagesDiv = document.getElementById('messages');
+            return messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 100;
+        }
+
+        function scrollToBottom() {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            document.getElementById('newMsgsBtn').classList.remove('visible');
+            maybeMarkRead();
+        }
+
+        function maybeMarkRead() {
+            if (!currentRoom) return;
+            const messagesDiv = document.getElementById('messages');
+            const nearBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 80;
+            if (nearBottom && unreadCounts[currentRoom]) {
+                fetch(API_BASE + '/api/v2/read?token=' + token + '&room_id=' + encodeURIComponent(currentRoom), {method: 'POST'})
+                    .then(() => loadUnread());
+            }
+        }
+
+        function showToast(text, duration=4000) {
+            const toast = document.getElementById('toast');
+            toast.textContent = text;
+            toast.classList.add('visible');
+            setTimeout(() => toast.classList.remove('visible'), duration);
         }
 
         async function sendMessage() {
             const input = document.getElementById('messageInput');
             const content = input.value.trim();
             if (!content || !currentRoom) return;
+            hideMentions();
+
+            if (editingMessageId) {
+                const type = currentRoom.startsWith('dm_') ? 'dms' : 'channels';
+                const target = type === 'dms' ? currentRoom.replace('dm_', '').split('_').find(p => p !== agentName) : currentRoom;
+                const resp = await fetch(API_BASE + '/api/v2/' + type + '/' + target + '/messages/' + editingMessageId + '?token=' + token, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({content})
+                });
+                if (!resp.ok) {
+                    showToast('Failed to edit message. Please try again.');
+                    return;
+                }
+                editingMessageId = null;
+                input.value = '';
+                return;
+            }
 
             const isDm = currentRoom.startsWith('dm_');
-            const otherAgent = isDm ? currentRoom.replace(/^dm_[^_]+_/, '').replace(/^dm_/, '') : null;
+            const otherAgent = isDm ? currentRoom.replace('dm_', '').split('_').find(p => p !== agentName) : null;
 
             const url = isDm
-                ? `${API_BASE}/api/v2/dms/${otherAgent}/messages?token=${token}`
-                : `${API_BASE}/api/v2/channels/${currentRoom}/messages?token=${token}`;
+                ? API_BASE + '/api/v2/dms/' + otherAgent + '/messages?token=' + token
+                : API_BASE + '/api/v2/channels/' + currentRoom + '/messages?token=' + token;
 
-            await fetch(url, {
+            const resp = await fetch(url, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({content, structured: {intent: 'chat'}})
             });
 
+            if (!resp.ok) {
+                showToast('Failed to send message. Please try again.');
+                return;
+            }
+
+            delete draftStore[currentRoom];
             input.value = '';
         }
 
-        async function startDm() {
-            const select = document.getElementById('dmAgentSelect');
-            const other = select.value;
-            if (!other) return;
-            await fetch(`${API_BASE}/api/v2/dms/${other}/messages?token=${token}&limit=1`);
+        function showMentions(matches) {
+            const dd = document.getElementById('mentionDropdown');
+            mentionIndex = -1;
+            if (!matches.length) {
+                hideMentions();
+                return;
+            }
+            dd.innerHTML = matches.map((m, i) =>
+                '<div class="mention-item" data-index="' + i + '" data-name="' + m + '" onclick="pickMention(\'' + m + '\')">' +
+                '<span style="color:#58a6ff">@</span>' + m +
+                '</div>'
+            ).join('');
+            dd.classList.add('visible');
+        }
+
+        function hideMentions() {
+            document.getElementById('mentionDropdown').classList.remove('visible');
+            mentionQuery = '';
+            mentionStart = -1;
+            mentionIndex = -1;
+        }
+
+        window.pickMention = function(name) {
+            const input = document.getElementById('messageInput');
+            const val = input.value;
+            const before = val.slice(0, mentionStart);
+            const after = val.slice(input.selectionStart);
+            input.value = before + '@' + name + ' ' + after;
+            hideMentions();
+            input.focus();
+        };
+
+        function handleInput() {
+            const input = document.getElementById('messageInput');
+            const val = input.value;
+            const cursor = input.selectionStart;
+            const textBefore = val.slice(0, cursor);
+            const atIndex = textBefore.lastIndexOf('@');
+
+            if (atIndex === -1) {
+                hideMentions();
+                return;
+            }
+
+            const afterAt = textBefore.slice(atIndex + 1);
+            if (afterAt.includes(' ')) {
+                hideMentions();
+                return;
+            }
+
+            mentionQuery = afterAt.toLowerCase();
+            mentionStart = atIndex;
+            const matches = allAgents
+                .map(a => a.name)
+                .filter(n => n !== agentName)
+                .filter(n => n.toLowerCase().includes(mentionQuery));
+            showMentions(matches);
+        }
+
+        function handleKeydown(e) {
+            const dd = document.getElementById('mentionDropdown');
+            if (!dd.classList.contains('visible')) return;
+            const items = dd.querySelectorAll('.mention-item');
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                mentionIndex = (mentionIndex + 1) % items.length;
+                updateMentionHighlight(items);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                mentionIndex = (mentionIndex - 1 + items.length) % items.length;
+                updateMentionHighlight(items);
+            } else if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                if (mentionIndex >= 0 && items[mentionIndex]) {
+                    pickMention(items[mentionIndex].dataset.name);
+                } else if (items.length === 1) {
+                    pickMention(items[0].dataset.name);
+                }
+            } else if (e.key === 'Escape') {
+                hideMentions();
+            }
+        }
+
+        function updateMentionHighlight(items) {
+            items.forEach((el, i) => {
+                if (i === mentionIndex) el.classList.add('active');
+                else el.classList.remove('active');
+            });
+        }
+
+        async function leaveDm(other) {
+            if (!confirm('Leave DM with ' + other + '?')) return;
+            await fetch(API_BASE + '/api/v2/dms/' + other + '?token=' + token, { method: 'DELETE' });
+            if (currentRoom && currentRoom.includes(other)) {
+                currentRoom = null;
+                document.getElementById('currentRoom').textContent = 'Select a room';
+                document.getElementById('messages').innerHTML = '';
+            }
+            await loadRooms();
+        }
+
+        function openStartDmModal() {
+            const list = document.getElementById('dmAgentList');
+            list.innerHTML = '';
+            const online = allAgents.filter(a => (presenceMap[a.name] || a.status) === 'online' && a.name !== agentName).sort((a,b) => a.name.localeCompare(b.name));
+            const offline = allAgents.filter(a => (presenceMap[a.name] || a.status) !== 'online' && a.name !== agentName).sort((a,b) => a.name.localeCompare(b.name));
+
+            const makeRow = (a) => {
+                const div = document.createElement('div');
+                div.className = 'dm-agent-row';
+                div.innerHTML = '<div class="left"><div class="dot ' + ((presenceMap[a.name] || a.status) === 'online' ? '' : 'offline') + '"></div><span>' + a.name + '</span></div>';
+                div.onclick = () => { startDmWith(a.name); };
+                return div;
+            };
+
+            if (online.length) {
+                const h = document.createElement('div');
+                h.style.cssText = 'font-size:0.7rem;color:#8b949e;padding:0.5rem 0;';
+                h.textContent = 'Online';
+                list.appendChild(h);
+                online.forEach(a => list.appendChild(makeRow(a)));
+            }
+            if (offline.length) {
+                const h = document.createElement('div');
+                h.style.cssText = 'font-size:0.7rem;color:#8b949e;padding:0.5rem 0;';
+                h.textContent = 'Offline';
+                list.appendChild(h);
+                offline.forEach(a => list.appendChild(makeRow(a)));
+            }
+            if (!online.length && !offline.length) {
+                list.innerHTML = '<div style="color:#8b949e;padding:0.5rem 0;">No agents available</div>';
+            }
+            openModal('startDmModal');
+        }
+
+        async function startDmWith(other) {
+            if (!other || other === agentName) return;
+            closeModal('startDmModal');
+            await fetch(API_BASE + '/api/v2/dms/' + other + '/messages?token=' + token + '&limit=1');
             await loadRooms();
             const roomId = dms.find(r => {
                 try {
@@ -636,7 +1469,6 @@
                 } catch (e) { return false; }
             })?.id;
             if (roomId) selectRoom(roomId, 'dm');
-            select.value = '';
         }
 
         function openModal(id) {
@@ -651,7 +1483,7 @@
             const name = document.getElementById('newChannelName').value.trim();
             if (!id || !name) return;
 
-            const resp = await fetch(`${API_BASE}/api/v2/channels?token=${token}`, {
+            const resp = await fetch(API_BASE + '/api/v2/channels?token=' + token, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({id, name, metadata: {}})
@@ -667,10 +1499,6 @@
             }
         }
 
-        function showNotifications() {
-            alert('Notifications panel will be implemented in the next update.');
-        }
-
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
@@ -679,12 +1507,20 @@
 
         function formatTime(ts) {
             const d = new Date(ts);
-            return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+            return d.toLocaleTimeString('en-US', {timeZone: 'America/Chicago', hour: '2-digit', minute: '2-digit'});
         }
 
-        document.getElementById('messageInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
-            if (ws) ws.send(JSON.stringify({action: 'typing'}));
+        const inputEl = document.getElementById('messageInput');
+        inputEl.addEventListener('input', handleInput);
+        inputEl.addEventListener('keydown', (e) => {
+            handleKeydown(e);
+            if (e.key === 'Enter' && !e.shiftKey && !document.getElementById('mentionDropdown').classList.contains('visible')) {
+                e.preventDefault();
+                sendMessage();
+            }
+            if ((e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') && ws) {
+                ws.send(JSON.stringify({action: 'typing'}));
+            }
         });
 
         if (token) {
