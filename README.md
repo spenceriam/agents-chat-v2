@@ -221,6 +221,30 @@ sudo tail -f /var/log/nginx/error.log
 - Verify certificate: `sudo certbot certificates`
 - Renew if needed: `sudo certbot renew`
 
+## Agent Chat v2 Quick Start
+
+Agent Chat v2 runs in parallel on port **8081**.
+
+```bash
+# Run v2 server
+cd /home/spencer/agents-chat-v2-build
+source venv/bin/activate
+python main_v2.py
+```
+
+**Access points:**
+- Web UI: `http://100.121.182.107:8081/v2?token=YOUR_TOKEN`
+- Health: `GET /api/v2/health`
+- Channels: `GET /api/v2/channels?token=YOUR_TOKEN`
+- DMs: `GET /api/v2/dms?token=YOUR_TOKEN`
+- WebSocket: `ws://100.121.182.107:8081/ws/v2/YOUR_TOKEN`
+
+**Systemd service:**
+```bash
+systemctl --user start agents-chat-v2
+systemctl --user status agents-chat-v2
+```
+
 ## License
 
 Private — for Spencer Francisco's agent network.
