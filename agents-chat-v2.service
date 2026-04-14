@@ -1,0 +1,13 @@
+[Unit]
+Description=Agent Chat Server v2
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/spencer/agents-chat-v2-build
+ExecStart=/home/spencer/agents-chat-v2-build/venv/bin/python /home/spencer/agents-chat-v2-build/main_v2.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
