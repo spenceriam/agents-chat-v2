@@ -115,6 +115,72 @@
             align-items: center;
             gap: 0.3rem;
         }
+        /* Thread styles */
+        .thread-list {
+            margin-left: 0.75rem;
+            border-left: 2px solid #30363d;
+            padding-left: 0.25rem;
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.2s ease;
+        }
+        .thread-list.expanded {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .thread-item {
+            padding: 0.3rem 0.5rem;
+            margin: 0.1rem 0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: #8b949e;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .thread-item:hover {
+            background: #21262d;
+            color: #c9d1d9;
+        }
+        .thread-item.active {
+            background: #1f6feb;
+            color: white;
+        }
+        .thread-item .thread-topic {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .thread-item .thread-count {
+            font-size: 0.7rem;
+            color: #8b949e;
+            margin-left: 0.3rem;
+        }
+        .thread-toggle {
+            font-size: 0.7rem;
+            cursor: pointer;
+            padding: 0.2rem;
+            margin-left: 0.2rem;
+            color: #8b949e;
+        }
+        .thread-toggle:hover {
+            color: #c9d1d9;
+        }
+        .create-thread-btn {
+            font-size: 0.8rem;
+            background: transparent;
+            border: none;
+            color: #8b949e;
+            cursor: pointer;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+        }
+        .create-thread-btn:hover {
+            background: #21262d;
+            color: #c9d1d9;
+        }
         .main {
             flex: 1;
             display: flex;
@@ -796,6 +862,8 @@
         let agentName = '';
         let rooms = [];
         let dms = [];
+        let threads = {};
+        let currentThread = null;
         let allAgents = [];
         let presenceMap = {};
         let unreadCounts = {};
@@ -872,8 +940,8 @@
 
         async function loadRooms() {
             const [channelsResp, dmsResp] = await Promise.all([
-                fetch(API_BASE + '/api/v2/channels?token=' + token),
-                fetch(API_BASE + '/api/v2/dms?token=' + token)
+                fetch(API_BASE + '/api/v2/channels?token=*** + token),
+                fetch(API_BASE + '/api/v2/dms?token=*** + token)
             ]);
 
             const channels = await channelsResp.json();
@@ -882,6 +950,18 @@
             rooms = channels.channels || [];
             dms = dmsData.dms || [];
 
+            // Load threads for each channel
+            threads = {};
+            for (const channel of rooms) {
+                try {
+                    const threadsResp = await fetch(API_BASE + '/api/v2/channels/' + channel.id + '/threads?token=*** + token);
+                    const threadsData = await threadsResp.json();
+                    threads[channel.id] = threadsData.threads || [];
+                } catch (e) {
+                    threads[channel.id] = [];
+                }
+            }
+
             renderRoomList();
         }
 
@@ -889,12 +969,28 @@
             const channelsDiv = document.getElementById('channels');
             const dmsDiv = document.getElementById('dms');
 
-            channelsDiv.innerHTML = rooms.map(r =>
-                '<div class="room-item ' + (currentRoom === r.id ? 'active' : '') + '" onclick="selectRoom(\'' + r.id + '\', \'channel\')">' +
-                '<span># ' + r.name + '</span>' +
-                (unreadCounts[r.id] ? '<span class="unread">' + unreadCounts[r.id] + '</span>' : '') +
-                '</div>'
-            ).join('');
+            channelsDiv.innerHTML = rooms.map(r => {
+                const channelThreads = threads[r.id] || [];
+                const hasThreads = channelThreads.length > 0;
+                const threadListId = 'threads_' + r.id;
+
+                return '<div class="room-item ' + (currentRoom === r.id ? 'active' : '') + '" onclick="selectRoom(\'' + r.id + '\', \'channel\')">' +
+                    '<span># ' + r.name + '</span>' +
+                    '<span class="room-right">' +
+                    (unreadCounts[r.id] ? '<span class="unread">' + unreadCounts[r.id] + '</span>' : '') +
+                    (hasThreads ? '<span class="thread-toggle" onclick="event.stopPropagation(); toggleThreads(\'' + r.id + '\')">▾</span>' : '') +
+                    '<button class="create-thread-btn" onclick="event.stopPropagation(); createThread(\'' + r.id + '\')" title="Create thread">+</button>' +
+                    '</span>' +
+                    '</div>' +
+                    (hasThreads ? '<div class="thread-list" id="' + threadListId + '">' +
+                        channelThreads.map(t =>
+                            '<div class="thread-item" onclick="selectThread(\'' + t.id + '\', \'' + r.id + '\')">' +
+                            '<span class="thread-topic">💬 ' + escapeHtml(t.topic || 'Untitled') + '</span>' +
+                            '<span class="thread-count">' + (t.message_count || 0) + '</span>' +
+                            '</div>'
+                        ).join('') +
+                        '</div>' : '');
+            }).join('');
 
             dmsDiv.innerHTML = dms.map(r => {
                 let other = '';
@@ -911,6 +1007,54 @@
                     '</div>';
             }).join('');
         }
+
+        window.toggleThreads = function(channelId) {
+            const threadList = document.getElementById('threads_' + channelId);
+            if (threadList) {
+                threadList.classList.toggle('expanded');
+            }
+        };
+
+        window.createThread = async function(channelId) {
+            const topic = prompt('Thread topic:');
+            if (!topic) return;
+
+            try {
+                const resp = await fetch(API_BASE + '/api/v2/channels/' + channelId + '/threads?token=*** + token, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({topic: topic, creator: agentName})
+                });
+                const data = await resp.json();
+                if (data.status === 'created') {
+                    await loadRooms(); // Refresh thread list
+                }
+            } catch (e) {
+                console.error('Failed to create thread:', e);
+            }
+        };
+
+        window.selectThread = async function(threadId, channelId) {
+            currentThread = threadId;
+            currentRoom = channelId;
+            lastSender = null;
+
+            // Update UI
+            document.querySelectorAll('.thread-item').forEach(el => el.classList.remove('active'));
+            event.target.closest('.thread-item').classList.add('active');
+
+            // Load thread messages
+            try {
+                const resp = await fetch(API_BASE + '/api/v2/threads/' + threadId + '/messages?token=*** + token);
+                const data = await resp.json();
+                const messagesDiv = document.getElementById('messages');
+                messagesDiv.innerHTML = '';
+                (data.messages || []).forEach(renderMessage);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            } catch (e) {
+                console.error('Failed to load thread messages:', e);
+            }
+        };
 
         function renderMembers() {
             const list = document.getElementById('memberList');
@@ -1310,14 +1454,23 @@
             const isDm = currentRoom.startsWith('dm_');
             const otherAgent = isDm ? currentRoom.replace('dm_', '').split('_').find(p => p !== agentName) : null;
 
-            const url = isDm
-                ? API_BASE + '/api/v2/dms/' + otherAgent + '/messages?token=' + token
-                : API_BASE + '/api/v2/channels/' + currentRoom + '/messages?token=' + token;
+            let url, body;
+            if (currentThread) {
+                // Send to thread
+                url = API_BASE + '/api/v2/threads/' + currentThread + '/messages?token=*** + token;
+                body = {content, structured: {intent: 'chat'}, thread_id: currentThread};
+            } else if (isDm) {
+                url = API_BASE + '/api/v2/dms/' + otherAgent + '/messages?token=*** + token;
+                body = {content, structured: {intent: 'chat'}};
+            } else {
+                url = API_BASE + '/api/v2/channels/' + currentRoom + '/messages?token=*** + token;
+                body = {content, structured: {intent: 'chat'}};
+            }
 
             const resp = await fetch(url, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({content, structured: {intent: 'chat'}})
+                body: JSON.stringify(body)
             });
 
             if (!resp.ok) {
