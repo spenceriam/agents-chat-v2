@@ -970,7 +970,7 @@ async def delete_channel_message(room_id: str, msg_id: str, token: str):
 # --- Thread API Endpoints (FEAT-001 Phase 1) ---
 
 @app.post("/api/v2/channels/{channel_id}/threads")
-async def create_thread(channel_id: str, token: str, req: CreateThreadRequest):
+async def create_thread_endpoint(channel_id: str, token: str, req: CreateThreadRequest):
     agent = get_agent_by_token(token)
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
