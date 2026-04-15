@@ -202,6 +202,37 @@ def init_db():
         )
     ''')
 
+    # Thread/subchannel tables (FEAT-001 Phase 1)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS threads (
+            id TEXT PRIMARY KEY,
+            parent_channel_id TEXT REFERENCES rooms(id),
+            creator TEXT,
+            topic TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_archived BOOLEAN DEFAULT FALSE
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS thread_members (
+            thread_id TEXT REFERENCES threads(id),
+            agent_name TEXT,
+            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (thread_id, agent_name)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_channel_id, is_archived)
+    ''')
+
+    # Migration: add thread_id to messages if missing
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN thread_id TEXT REFERENCES threads(id)")
+    except sqlite3.OperationalError:
+        pass
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -376,6 +407,142 @@ def get_or_create_room(room_id: str, room_type: str = "channel") -> dict:
     if row:
         return dict(row)
     return None
+
+
+# --- Thread helpers (FEAT-001 Phase 1) ---
+
+def create_thread(channel_id: str, creator: str, topic: str) -> dict:
+    thread_id = f"thread_{channel_id}_{uuid.uuid4().hex[:8]}"
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM rooms WHERE id = ? AND type = 'channel'", (channel_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise ValueError(f"Channel '{channel_id}' not found")
+    cursor.execute(
+        "INSERT INTO threads (id, parent_channel_id, creator, topic) VALUES (?, ?, ?, ?)",
+        (thread_id, channel_id, creator, topic)
+    )
+    cursor.execute("INSERT INTO thread_members (thread_id, agent_name) VALUES (?, ?)", (thread_id, creator))
+    conn.commit()
+    cursor.execute("SELECT * FROM threads WHERE id = ?", (thread_id,))
+    thread = dict(cursor.fetchone())
+    conn.close()
+    return thread
+
+
+def list_threads(channel_id: str, include_archived: bool = False) -> list:
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    af = "" if include_archived else "AND t.is_archived = FALSE"
+    cursor.execute(
+        "SELECT t.*, "
+        "(SELECT COUNT(*) FROM thread_members tm WHERE tm.thread_id = t.id) as member_count, "
+        "(SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) as message_count, "
+        "(SELECT MAX(timestamp) FROM messages m WHERE m.thread_id = t.id) as last_message_at "
+        "FROM threads t WHERE t.parent_channel_id = ? " + af +
+        " ORDER BY t.created_at DESC",
+        (channel_id,)
+    )
+    threads = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return threads
+
+
+def get_thread(thread_id: str) -> dict | None:
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM threads WHERE id = ?", (thread_id,))
+    thread = cursor.fetchone()
+    if not thread:
+        conn.close()
+        return None
+    thread = dict(thread)
+    cursor.execute("SELECT agent_name, joined_at FROM thread_members WHERE thread_id = ? ORDER BY joined_at", (thread_id,))
+    thread["members"] = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return thread
+
+
+def join_thread(thread_id: str, agent_name: str) -> bool:
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO thread_members (thread_id, agent_name) VALUES (?, ?)", (thread_id, agent_name))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+
+def archive_thread(thread_id: str) -> bool:
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE threads SET is_archived = TRUE WHERE id = ?", (thread_id,))
+    updated = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def update_thread_topic(thread_id: str, topic: str) -> bool:
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE threads SET topic = ? WHERE id = ?", (topic, thread_id))
+    updated = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def get_thread_messages(thread_id: str, limit: int = 50, before_id: str = None) -> list:
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if before_id:
+        cursor.execute(
+            "SELECT * FROM messages WHERE thread_id = ? AND timestamp < "
+            "(SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp DESC LIMIT ?",
+            (thread_id, before_id, limit)
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM messages WHERE thread_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (thread_id, limit)
+        )
+    rows = cursor.fetchall()
+    conn.close()
+    messages = []
+    for row in reversed(rows):
+        msg = dict(row)
+        if msg.get("structured"):
+            msg["structured"] = json.loads(msg["structured"])
+        messages.append(msg)
+    return messages
+
+
+def save_thread_message(thread_id: str, room_id: str, sender: str, content: str,
+                        structured: dict = None, requires_human: bool = False,
+                        mentions_spencer: bool = False) -> str:
+    msg_id = str(uuid.uuid4())
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO messages (id, room_id, thread_id, sender, content, structured, requires_human, mentions_spencer, is_deleted) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE)",
+        (msg_id, room_id, thread_id, sender, content,
+         json.dumps(structured) if structured else None,
+         requires_human, mentions_spencer)
+    )
+    conn.commit()
+    conn.close()
+    create_notifications_for_message(msg_id, room_id, sender, content, mentions_spencer)
+    return msg_id
 
 
 def save_message(room_id: str, sender: str, content: str, structured: dict = None,
@@ -623,6 +790,20 @@ class WebhookRegisterRequest(BaseModel):
     events: List[str] = ["all"]
 
 
+class CreateThreadRequest(BaseModel):
+    topic: str
+    metadata: Optional[dict] = None
+
+
+class SendThreadMessageRequest(BaseModel):
+    content: str
+    structured: Optional[dict] = None
+
+
+class ThreadUpdateRequest(BaseModel):
+    topic: str
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -747,6 +928,184 @@ async def delete_channel_message(room_id: str, msg_id: str, token: str):
         await broadcast_to_room(room_id, {
             "type": "message", "delete": True, "id": msg_id,
             "room_id": room_id, "sender": agent["name"],
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail="Message not found")
+
+
+# --- Thread API Endpoints (FEAT-001 Phase 1) ---
+
+@app.post("/api/v2/channels/{channel_id}/threads")
+async def create_thread(channel_id: str, token: str, req: CreateThreadRequest):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    try:
+        thread = create_thread(channel_id, agent["name"], req.topic)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    await broadcast_to_room(channel_id, {
+        "type": "thread_created",
+        "thread": thread,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+    return {"status": "created", "thread": thread}
+
+
+@app.get("/api/v2/channels/{channel_id}/threads")
+async def list_channel_threads(channel_id: str, token: str, archived: bool = False):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    threads = list_threads(channel_id, include_archived=archived)
+    return {"channel_id": channel_id, "threads": threads}
+
+
+@app.get("/api/v2/threads/{thread_id}")
+async def get_thread_info(thread_id: str, token: str):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return {"thread": thread}
+
+
+@app.put("/api/v2/threads/{thread_id}")
+async def update_thread(thread_id: str, token: str, req: ThreadUpdateRequest):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread["creator"] != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only creator or admin can update thread")
+    if update_thread_topic(thread_id, req.topic):
+        return {"status": "updated", "topic": req.topic}
+    raise HTTPException(status_code=500, detail="Failed to update thread")
+
+
+@app.post("/api/v2/threads/{thread_id}/join")
+async def join_thread_endpoint(thread_id: str, token: str):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread.get("is_archived"):
+        raise HTTPException(status_code=400, detail="Cannot join archived thread")
+    if join_thread(thread_id, agent["name"]):
+        return {"status": "joined"}
+    raise HTTPException(status_code=400, detail="Already a member or failed to join")
+
+
+@app.post("/api/v2/threads/{thread_id}/archive")
+async def archive_thread_endpoint(thread_id: str, token: str):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread["creator"] != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only creator or admin can archive thread")
+    if archive_thread(thread_id):
+        await broadcast_to_room(thread["parent_channel_id"], {
+            "type": "thread_archived",
+            "thread_id": thread_id,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        return {"status": "archived"}
+    raise HTTPException(status_code=404, detail="Thread not found")
+
+
+@app.post("/api/v2/threads/{thread_id}/messages")
+async def send_thread_message(thread_id: str, token: str, req: SendThreadMessageRequest):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread.get("is_archived"):
+        raise HTTPException(status_code=400, detail="Cannot send messages to archived thread")
+
+    mentions_spencer = "@Spencer" in req.content or req.content.lower().startswith("spencer")
+    requires_human = req.structured.get("requires_human", False) if req.structured else False
+
+    msg_id = save_thread_message(thread_id, thread["parent_channel_id"], agent["name"],
+                                 req.content, req.structured, requires_human, mentions_spencer)
+
+    await notify_mentions_ws(thread["parent_channel_id"], agent["name"], req.content, msg_id)
+
+    # Broadcast to parent channel subscribers with thread context
+    await broadcast_to_room(thread["parent_channel_id"], {
+        "type": "message",
+        "id": msg_id,
+        "room_id": thread["parent_channel_id"],
+        "thread_id": thread_id,
+        "sender": agent["name"],
+        "content": req.content,
+        "structured": req.structured,
+        "requires_human": requires_human,
+        "mentions_spencer": mentions_spencer,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+    return {"status": "sent", "id": msg_id, "thread_id": thread_id}
+
+
+@app.get("/api/v2/threads/{thread_id}/messages")
+async def get_thread_messages_endpoint(thread_id: str, token: str, limit: int = 50, before: str = None):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    messages = get_thread_messages(thread_id, limit, before)
+    return {"thread_id": thread_id, "messages": messages}
+
+
+@app.put("/api/v2/threads/{thread_id}/messages/{msg_id}")
+async def edit_thread_message(thread_id: str, msg_id: str, token: str, req: SendThreadMessageRequest):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if edit_message(msg_id, req.content):
+        mentions_spencer = "@Spencer" in req.content
+        create_notifications_for_message(msg_id, thread["parent_channel_id"], agent["name"], req.content, mentions_spencer)
+        await notify_mentions_ws(thread["parent_channel_id"], agent["name"], req.content, msg_id)
+        await broadcast_to_room(thread["parent_channel_id"], {
+            "type": "message", "edit": True, "id": msg_id,
+            "room_id": thread["parent_channel_id"], "thread_id": thread_id,
+            "sender": agent["name"], "content": req.content,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        return {"status": "edited"}
+    raise HTTPException(status_code=404, detail="Message not found or already deleted")
+
+
+@app.delete("/api/v2/threads/{thread_id}/messages/{msg_id}")
+async def delete_thread_message(thread_id: str, msg_id: str, token: str):
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    thread = get_thread(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if delete_message(msg_id):
+        await broadcast_to_room(thread["parent_channel_id"], {
+            "type": "message", "delete": True, "id": msg_id,
+            "room_id": thread["parent_channel_id"], "thread_id": thread_id,
+            "sender": agent["name"],
             "timestamp": datetime.utcnow().isoformat()
         })
         return {"status": "deleted"}
@@ -1100,6 +1459,39 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     status = msg.get("status", "online")
                     current_room = msg.get("current_room")
                     set_presence(agent_name, status, current_room)
+                
+                elif action == "subscribe_thread":
+                    thread_id = msg.get("thread_id")
+                    if thread_id:
+                        thread = get_thread(thread_id)
+                        if thread:
+                            join_thread(thread_id, agent_name)
+                            await presence_mgr.subscribe(agent_name, websocket, [thread["parent_channel_id"]])
+                            print(f"[WS] {agent_name} subscribed to thread {thread_id}")
+                            await websocket.send_json({
+                                "type": "system", "event": "thread_subscribed",
+                                "thread_id": thread_id, "rooms": [thread["parent_channel_id"]]
+                            })
+                
+                elif action == "send_thread":
+                    thread_id = msg.get("thread_id")
+                    content = msg.get("content", "")
+                    structured = msg.get("structured")
+                    thread = get_thread(thread_id) if thread_id else None
+                    if thread and not thread.get("is_archived"):
+                        mentions_spencer = "@Spencer" in content
+                        requires_human = structured.get("requires_human", False) if structured else False
+                        msg_id = save_thread_message(thread_id, thread["parent_channel_id"], agent_name,
+                                                     content, structured, requires_human, mentions_spencer)
+                        await notify_mentions_ws(thread["parent_channel_id"], agent_name, content, msg_id)
+                        await broadcast_to_room(thread["parent_channel_id"], {
+                            "type": "message", "id": msg_id,
+                            "room_id": thread["parent_channel_id"], "thread_id": thread_id,
+                            "sender": agent_name, "content": content,
+                            "structured": structured, "requires_human": requires_human,
+                            "mentions_spencer": mentions_spencer,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
                 
             except json.JSONDecodeError:
                 pass
