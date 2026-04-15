@@ -25,6 +25,8 @@ AGENT_TOKENS = {}
 MAX_HISTORY_PER_CHANNEL = 50
 PRESENCE_AWAY_MINUTES = 10
 PRESENCE_OFFLINE_SECONDS = 60
+HEARTBEAT_TIMEOUT_SECONDS = 45  # No heartbeat = mark away
+HEARTBEAT_INTERVAL_SECONDS = 30  # Agents should heartbeat every 30s
 
 # In-memory presence and websocket tracking
 class PresenceManager:
@@ -33,6 +35,8 @@ class PresenceManager:
         self.subscriptions: Dict[str, Dict[str, List[str]]] = {}  # agent_name -> {websocket_id -> [room_ids]}
         self.room_subscribers: Dict[str, Dict[str, WebSocket]] = {}  # room_id -> {agent_name -> websocket} (O(1) lookup)
         self.typing: Dict[str, datetime] = {}  # agent_name -> last typing timestamp
+        self.heartbeats: Dict[str, datetime] = {}  # agent_name -> last heartbeat timestamp
+        self.reconnect_attempts: Dict[str, int] = {}  # agent_name -> consecutive reconnect attempts
         self.lock = asyncio.Lock()
     
     async def connect(self, agent_name: str, websocket: WebSocket):
@@ -109,15 +113,44 @@ class PresenceManager:
         async with self.lock:
             self.typing[agent_name] = datetime.utcnow()
     
+    async def record_heartbeat(self, agent_name: str):
+        """Record agent heartbeat to confirm liveness."""
+        async with self.lock:
+            self.heartbeats[agent_name] = datetime.utcnow()
+            # Reset reconnect attempts on heartbeat
+            self.reconnect_attempts.pop(agent_name, None)
+    
+    def get_reconnect_delay(self, agent_name: str) -> float:
+        """Calculate exponential backoff delay for reconnection (in seconds)."""
+        attempts = self.reconnect_attempts.get(agent_name, 0)
+        # Exponential backoff: 1s, 2s, 4s, 8s, max 60s
+        return min(2 ** attempts, 60.0)
+    
+    async def handle_reconnect(self, agent_name: str):
+        """Track reconnect attempt and apply backoff."""
+        async with self.lock:
+            attempts = self.reconnect_attempts.get(agent_name, 0) + 1
+            self.reconnect_attempts[agent_name] = attempts
+        delay = self.get_reconnect_delay(agent_name)
+        return {"attempts": attempts, "delay": delay}
+    
     def get_status(self, agent_name: str) -> str:
         conn_count = len(self.connections.get(agent_name, []))
         if conn_count > 0:
             last_typing = self.typing.get(agent_name)
+            last_heartbeat = self.heartbeats.get(agent_name)
             last_seen = get_presence_last_seen(agent_name)
+            # Check heartbeat staleness first
+            if last_heartbeat and (datetime.utcnow() - last_heartbeat).total_seconds() > HEARTBEAT_TIMEOUT_SECONDS:
+                return "away"
             if last_typing and (datetime.utcnow() - last_typing).total_seconds() < 120:
                 return "online"
             if last_seen and (datetime.utcnow() - last_seen).total_seconds() < PRESENCE_AWAY_MINUTES * 60:
                 return "online"
+            return "away"
+        # Check if recently disconnected (heartbeat still valid)
+        last_heartbeat = self.heartbeats.get(agent_name)
+        if last_heartbeat and (datetime.utcnow() - last_heartbeat).total_seconds() < HEARTBEAT_TIMEOUT_SECONDS:
             return "away"
         return "offline"
 
@@ -1302,6 +1335,27 @@ async def get_presence(token: str):
     return {"presence": all_presence}
 
 
+@app.post("/api/v2/presence/heartbeat")
+async def send_heartbeat(token: str):
+    """Agent heartbeat endpoint - confirms liveness."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    await presence_mgr.record_heartbeat(agent["name"])
+    return {"status": "ok", "agent": agent["name"], "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/v2/presence/reconnect")
+async def get_reconnect_info(token: str):
+    """Get reconnect backoff info for an agent."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    delay = presence_mgr.get_reconnect_delay(agent["name"])
+    attempts = presence_mgr.reconnect_attempts.get(agent["name"], 0)
+    return {"agent": agent["name"], "reconnect_attempts": attempts, "backoff_seconds": delay}
+
+
 @app.get("/api/v2/admin/banner")
 async def admin_get_banner(token: str):
     agent = get_agent_by_token(token)
@@ -1383,6 +1437,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     
     await websocket.accept()
     agent_name = agent["name"]
+    
+    # Track reconnect attempts and calculate backoff
+    was_connected = agent_name in presence_mgr.connections and len(presence_mgr.connections.get(agent_name, [])) > 0
+    reconnect_info = None
+    if was_connected or agent_name in presence_mgr.reconnect_attempts:
+        reconnect_info = await presence_mgr.handle_reconnect(agent_name)
+    
     await presence_mgr.connect(agent_name, websocket)
     
     try:
@@ -1400,14 +1461,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         # Send welcome with agent's rooms and current banner
         rooms = get_agent_rooms(agent_name)
         room_ids = [r["id"] for r in rooms]
-        await websocket.send_json({
+        welcome_msg = {
             "type": "system",
             "event": "connected",
             "agent": agent_name,
             "rooms": room_ids,
             "banner": get_banner(),
             "timestamp": datetime.utcnow().isoformat()
-        })
+        }
+        if reconnect_info:
+            welcome_msg["reconnect"] = reconnect_info
+            welcome_msg["reconnected"] = True
+        await websocket.send_json(welcome_msg)
 
         # Auto-subscribe to all rooms so clients never miss messages
         await presence_mgr.subscribe(agent_name, websocket, room_ids)
@@ -1431,6 +1496,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 
                 elif action == "typing":
                     await presence_mgr.set_typing(agent_name)
+                
+                elif action == "heartbeat":
+                    await presence_mgr.record_heartbeat(agent_name)
                 
                 elif action == "send":
                     room_id = msg.get("room_id", "general")
@@ -1548,6 +1616,32 @@ def _watch_html():
 
 watcher_thread = threading.Thread(target=_watch_html, daemon=True)
 watcher_thread.start()
+
+
+# --- Heartbeat timeout checker (FEAT-002) ---
+def _check_heartbeat_timeouts():
+    """Periodically check for agents with stale heartbeats and mark them away."""
+    while True:
+        time.sleep(HEARTBEAT_TIMEOUT_SECONDS)
+        try:
+            now = datetime.utcnow()
+            stale_agents = []
+            for agent_name, last_hb in list(presence_mgr.heartbeats.items()):
+                if (now - last_hb).total_seconds() > HEARTBEAT_TIMEOUT_SECONDS:
+                    conn_count = len(presence_mgr.connections.get(agent_name, []))
+                    if conn_count > 0:
+                        stale_agents.append(agent_name)
+            for agent_name in stale_agents:
+                # Broadcast away status for stale agents
+                asyncio.get_event_loop().create_task(
+                    presence_mgr.broadcast_presence(agent_name, "away")
+                )
+        except Exception:
+            pass
+
+
+heartbeat_checker = threading.Thread(target=_check_heartbeat_timeouts, daemon=True)
+heartbeat_checker.start()
 
 
 if __name__ == "__main__":
