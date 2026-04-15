@@ -1,0 +1,19 @@
+[Unit]
+Description=ACV2 Agent Presence Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/spencer/.local/bin/acv2_daemon.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment - customize per agent
+Environment=ACV2_HOST=100.121.182.107
+Environment=ACV2_PORT=8081
+
+[Install]
+WantedBy=default.target
