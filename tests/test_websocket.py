@@ -10,8 +10,8 @@ from main_v2 import app, init_db, load_agents
 # Configure asyncio mode
 pytestmark = pytest.mark.asyncio
 
-TEST_TOKEN = "664500...1e35"
-DATA_TOKEN = "a1b2c3...def0"
+TEST_TOKEN = "664500b7-81ab-4a20-9d72-9c1e97ea1e35"
+DATA_TOKEN = "data-token-uuid-12345"
 
 @pytest_asyncio.fixture
 async def client():
@@ -27,10 +27,17 @@ async def client():
 
 async def test_ws_connect_and_welcome(client):
     """Test WebSocket connection returns welcome message with rooms and banner."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with tc.websocket_connect(f"/ws/v2/{TEST_TOKEN}") as ws:
+        # First message may be presence_update (from auto-subscribe) or welcome
         data = ws.receive_json()
+        if data.get("type") == "presence_update":
+            data = ws.receive_json()
         assert data["type"] == "system"
         assert data["event"] == "connected"
         assert "rooms" in data
@@ -40,11 +47,18 @@ async def test_ws_connect_and_welcome(client):
 
 async def test_ws_subscribe(client):
     """Test subscribing to specific rooms via WebSocket."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with tc.websocket_connect(f"/ws/v2/{TEST_TOKEN}") as ws:
-        # Receive welcome
-        ws.receive_json()
+        # Consume welcome + any presence_update
+        data = ws.receive_json()
+        while data.get("type") == "presence_update":
+            data = ws.receive_json()
+        # data is now the welcome message
         # Subscribe to additional rooms
         ws.send_json({"action": "subscribe", "rooms": ["general", "ops"]})
         data = ws.receive_json()
@@ -56,18 +70,27 @@ async def test_ws_subscribe(client):
 
 async def test_ws_send_message(client):
     """Test sending a message via WebSocket action."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with tc.websocket_connect(f"/ws/v2/{TEST_TOKEN}") as ws:
-        ws.receive_json()  # welcome
+        # Consume welcome + any presence_update
+        data = ws.receive_json()
+        while data.get("type") == "presence_update":
+            data = ws.receive_json()
         ws.send_json({
             "action": "send",
             "room_id": "general",
             "content": "Hello from WebSocket!",
             "structured": {"intent": "test"}
         })
-        # Should receive the broadcast back
+        # Should receive the broadcast back (skip any system/presence messages)
         data = ws.receive_json()
+        while data.get("type") != "message":
+            data = ws.receive_json()
         assert data["type"] == "message"
         assert data["content"] == "Hello from WebSocket!"
         assert data["sender"] == "Hermes"
@@ -76,6 +99,10 @@ async def test_ws_send_message(client):
 
 async def test_ws_typing_indicator(client):
     """Test typing indicator via WebSocket."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with tc.websocket_connect(f"/ws/v2/{TEST_TOKEN}") as ws:
@@ -88,24 +115,43 @@ async def test_ws_typing_indicator(client):
 
 async def test_ws_presence_update(client):
     """Test presence status update via WebSocket."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with tc.websocket_connect(f"/ws/v2/{TEST_TOKEN}") as ws:
-        ws.receive_json()  # welcome
+        # Consume welcome + any presence_update
+        data = ws.receive_json()
+        while data.get("type") == "presence_update":
+            data = ws.receive_json()
         ws.send_json({"action": "presence", "status": "online", "current_room": "general"})
         # Should broadcast presence_update to all
         data = ws.receive_json()
+        while data.get("type") != "presence_update":
+            data = ws.receive_json()
         assert data["type"] == "presence_update"
 
 
 async def test_ws_broadcast_message_delivery(client):
     """Test that messages sent via REST API are broadcast to WebSocket subscribers."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with tc.websocket_connect(f"/ws/v2/{TEST_TOKEN}") as ws:
-        ws.receive_json()  # welcome
+        # Consume welcome + any presence_update
+        data = ws.receive_json()
+        while data.get("type") == "presence_update":
+            data = ws.receive_json()
         ws.send_json({"action": "subscribe", "rooms": ["general"]})
-        ws.receive_json()  # subscribed confirmation
+        # Consume subscribed confirmation + any presence_update
+        data = ws.receive_json()
+        while data.get("type") == "presence_update":
+            data = ws.receive_json()
         
         # Send message via REST API
         response = await client.post(
@@ -122,15 +168,24 @@ async def test_ws_broadcast_message_delivery(client):
 
 async def test_ws_heartbeat(client):
     """Test heartbeat action via WebSocket."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with tc.websocket_connect(f"/ws/v2/{TEST_TOKEN}") as ws:
-        ws.receive_json()  # welcome
+        # Consume welcome + any presence_update
+        data = ws.receive_json()
+        while data.get("type") == "presence_update":
+            data = ws.receive_json()
         ws.send_json({"action": "heartbeat"})
         # Heartbeat doesn't send a response, just records the heartbeat
         # Verify connection is still alive
         ws.send_json({"action": "presence", "status": "online"})
         data = ws.receive_json()
+        while data.get("type") != "presence_update":
+            data = ws.receive_json()
         assert data["type"] == "presence_update"
 
 
@@ -306,6 +361,10 @@ async def test_thread_invalid_channel(client):
 
 async def test_ws_invalid_token():
     """Test WebSocket rejects invalid tokens."""
+    import main_v2
+    test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
+    with open(test_agents_path) as f:
+        main_v2.AGENT_TOKENS = json.load(f)
     from starlette.testclient import TestClient
     tc = TestClient(app)
     with pytest.raises(Exception):

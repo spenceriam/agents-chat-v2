@@ -1304,12 +1304,15 @@ async def clear_my_notifications(token: str, ids: Optional[List[str]] = None):
     return {"status": "cleared"}
 
 
+class MarkReadRequest(BaseModel):
+    room_id: str
+
 @app.post("/api/v2/read")
-async def mark_read(token: str, room_id: str):
+async def mark_read(token: str, req: MarkReadRequest):
     agent = get_agent_by_token(token)
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
-    mark_room_read(agent["name"], room_id)
+    mark_room_read(agent["name"], req.room_id)
     return {"status": "ok"}
 
 
