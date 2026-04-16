@@ -26,7 +26,15 @@ from pydantic import BaseModel, Field
 
 # Configuration — absolute DB path anchored to script directory
 BASE_DIR = Path(__file__).resolve().parent
-DATABASE = str(BASE_DIR / "chat_v2.db")
+DATABASE = os.getenv("ACV2_DATABASE", str(BASE_DIR / "chat_v2.db"))
+
+# Environment-based configuration with sensible defaults
+AGENT_TOKENS = json.loads(os.getenv("ACV2_AGENT_TOKENS", '{"spencer": "", "Data": ""}'))
+MAX_HISTORY_PER_CHANNEL = int(os.getenv("ACV2_MAX_HISTORY", "50"))
+PRESENCE_AWAY_MINUTES = int(os.getenv("ACV2_PRESENCE_AWAY_MINUTES", "10"))
+PRESENCE_OFFLINE_SECONDS = int(os.getenv("ACV2_PRESENCE_OFFLINE_SECONDS", "60"))
+HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("ACV2_HEARTBEAT_TIMEOUT", "45"))  # No heartbeat = mark away
+HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("ACV2_HEARTBEAT_INTERVAL", "30"))  # Agents should heartbeat every 30s
 
 # Structured logging setup
 logger = logging.getLogger("acv2")
@@ -41,18 +49,13 @@ if not logger.handlers:
 
 # Graceful shutdown flag
 _shutdown_event = threading.Event()
-AGENT_TOKENS = {}
-MAX_HISTORY_PER_CHANNEL = 50
-PRESENCE_AWAY_MINUTES = 10
-PRESENCE_OFFLINE_SECONDS = 60
-HEARTBEAT_TIMEOUT_SECONDS = 45  # No heartbeat = mark away
-HEARTBEAT_INTERVAL_SECONDS = 30  # Agents should heartbeat every 30s
 
 # In-memory presence and websocket tracking
 
 @contextmanager
 def get_db(row_factory: bool = True):
     """Context manager for SQLite connections. Ensures connections are always closed.
+    Enables WAL mode, foreign keys, and performance PRAGMAs on each connection.
 
     Usage:
         with get_db() as conn:
@@ -63,8 +66,15 @@ def get_db(row_factory: bool = True):
             conn.execute("SELECT ...")
         # Without row_factory, cursor returns tuples instead of dict-like Rows
     """
-    conn = sqlite3.connect(DATABASE)
+    conn = sqlite3.connect(DATABASE, timeout=10)
     try:
+        # Performance and safety PRAGMAs (per-connection)
+        conn.execute("PRAGMA journal_mode=WAL")       # Better concurrent read performance
+        conn.execute("PRAGMA foreign_keys=ON")         # Enforce foreign key constraints
+        conn.execute("PRAGMA busy_timeout=10000")      # Wait up to 10s on locked DB
+        conn.execute("PRAGMA cache_size=-2000")        # 2MB page cache (negative = KB)
+        conn.execute("PRAGMA synchronous=NORMAL")      # WAL mode is safe with NORMAL
+
         if row_factory:
             conn.row_factory = sqlite3.Row
         yield conn
@@ -114,7 +124,10 @@ class RateLimiter:
             return {"tokens_available": round(available, 1), "max_tokens": self.max_tokens, 
                     "refill_rate": self.refill_rate}
 
-rate_limiter = RateLimiter(max_tokens=10, refill_rate=1.0)  # 10 burst, 1/sec refill
+rate_limiter = RateLimiter(
+    max_tokens=int(os.getenv("ACV2_RATE_LIMIT_BURST", "10")),
+    refill_rate=float(os.getenv("ACV2_RATE_LIMIT_REFILL", "1.0"))
+)
 
 
 class PresenceManager:
@@ -306,9 +319,13 @@ metrics = APIMetrics()
 
 
 def init_db():
-    with get_db() as conn:
-        cursor = conn.cursor()
-    
+    """Initialize database schema, indexes, triggers, and seed data."""
+    conn = sqlite3.connect(DATABASE, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=10000")
+    cursor = conn.cursor()
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS rooms (
             id TEXT PRIMARY KEY,
@@ -539,6 +556,10 @@ def init_db():
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_pinned_room ON pinned_messages(room_id)
     ''')
+
+    conn.commit()
+    conn.close()
+
 
 def load_agents():
     global AGENT_TOKENS
@@ -1271,43 +1292,50 @@ def get_dm_room_id(agent_a: str, agent_b: str) -> Optional[str]:
 
 # Pydantic models
 class SendMessageRequest(BaseModel):
-    content: str = ""
-    structured: Optional[dict] = None
-    room_id: str = "general"
-    image_url: Optional[str] = None  # Screenshot/image reference (file path or URL)
-    image_type: Optional[str] = None  # MIME type: "image/png", "image/jpeg"
+    """Send a message to a channel, DM, or thread."""
+    content: str = Field(default="", description="Message text (supports Markdown)")
+    structured: Optional[dict] = Field(default=None, description="Structured data payload")
+    room_id: str = Field(default="general", description="Target room (channel, DM, or thread ID)")
+    image_url: Optional[str] = Field(default=None, description="Screenshot/image reference (file path or URL)")
+    image_type: Optional[str] = Field(default=None, description="MIME type: image/png, image/jpeg")
 
 
 class CreateChannelRequest(BaseModel):
-    id: str
-    name: str
-    metadata: Optional[dict] = None
+    """Create a new channel room."""
+    id: str = Field(description="Channel identifier (e.g., 'engineering')")
+    name: str = Field(description="Display name")
+    metadata: Optional[dict] = Field(default=None, description="Optional channel metadata")
 
 
 class SubscribeRequest(BaseModel):
-    rooms: List[str]
-    presence: str = "online"
+    """Subscribe to rooms and set presence status."""
+    rooms: List[str] = Field(description="List of room IDs to subscribe to")
+    presence: str = Field(default="online", description="Presence status: online, away, busy")
 
 
 class WebhookRegisterRequest(BaseModel):
-    url: str
-    events: List[str] = ["all"]
+    """Register a webhook for event notifications."""
+    url: str = Field(description="Webhook callback URL")
+    events: List[str] = Field(default=["all"], description="Event types to subscribe to")
 
 
 class CreateThreadRequest(BaseModel):
-    topic: str
-    metadata: Optional[dict] = None
+    """Create a new thread within a room."""
+    topic: str = Field(description="Thread topic/title")
+    metadata: Optional[dict] = Field(default=None, description="Optional thread metadata")
 
 
 class SendThreadMessageRequest(BaseModel):
-    content: str = ""
-    structured: Optional[dict] = None
-    image_url: Optional[str] = None
-    image_type: Optional[str] = None
+    """Send a message within a thread."""
+    content: str = Field(default="", description="Message text (supports Markdown)")
+    structured: Optional[dict] = Field(default=None, description="Structured data payload")
+    image_url: Optional[str] = Field(default=None, description="Image attachment URL or path")
+    image_type: Optional[str] = Field(default=None, description="MIME type of image")
 
 
 class ThreadUpdateRequest(BaseModel):
-    topic: str
+    """Update thread properties."""
+    topic: str = Field(description="New thread topic/title")
 
 
 @asynccontextmanager
@@ -1334,7 +1362,15 @@ async def lifespan(app: FastAPI):
         logger.info("ACV2 server shutdown complete")
 
 
-app = FastAPI(title="Agent Chat v2", lifespan=lifespan)
+app = FastAPI(
+    title="Agent Chat v2",
+    description="Real-time messaging platform for AI agents and humans. Supports channels, DMs, threads, reactions, pinning, presence, and full WebSocket pub/sub.",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
 
 
 # Middleware: request counting, correlation IDs, and rate limit headers
@@ -1423,17 +1459,21 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 class UploadImageRequest(BaseModel):
-    filename: str
-    data: str  # base64-encoded image data
-    content_type: str  # MIME type
+    """Upload an image (screenshot, attachment) as base64 data."""
+    filename: str = Field(description="Original filename")
+    data: str = Field(description="Base64-encoded image data")
+    content_type: str = Field(description="MIME type (e.g., image/png)")
 
 
 # --- Reactions & Pinning Models (UX-002, UX-004) ---
 class ReactionRequest(BaseModel):
-    emoji: str
+    """Add or remove a reaction emoji on a message."""
+    emoji: str = Field(description="Emoji character (e.g., '👍', '🎉')")
+
 
 class PinRequest(BaseModel):
-    message_id: str
+    """Pin or unpin a message."""
+    message_id: str = Field(description="Message ID to pin/unpin")
 
 
 @app.post("/api/v2/screenshots")
@@ -2091,12 +2131,14 @@ async def clear_my_notifications(token: str, ids: Optional[List[str]] = None):
 
 
 class MarkReadRequest(BaseModel):
-    room_id: str
+    """Mark messages in a room as read."""
+    room_id: str = Field(description="Room ID to mark as read")
 
 
 class StatusUpdateRequest(BaseModel):
-    status_detail: Optional[str] = None  # idle, busy, error, typing, in_call, debugging, deploying
-    status_message: Optional[str] = None  # Free-form status message
+    """Update agent presence status and details."""
+    status_detail: Optional[str] = Field(default=None, description="Status: idle, busy, error, typing, in_call, debugging, deploying")
+    status_message: Optional[str] = Field(default=None, description="Free-form status message")
 
 
 @app.post("/api/v2/presence/status")
@@ -2196,10 +2238,11 @@ async def get_rate_limit_status(token: str):
 
 
 class SearchRequest(BaseModel):
-    q: str
-    room_id: Optional[str] = None
-    sender: Optional[str] = None
-    limit: int = 50
+    """Full-text search across messages using FTS5."""
+    q: str = Field(description="Search query (FTS5 syntax supported)")
+    room_id: Optional[str] = Field(default=None, description="Filter by room ID")
+    sender: Optional[str] = Field(default=None, description="Filter by sender name")
+    limit: int = Field(default=50, description="Max results to return")
 
 
 @app.post("/api/v2/search")
@@ -2223,7 +2266,8 @@ async def admin_get_banner(token: str):
 
 
 class BannerUpdate(BaseModel):
-    text: str
+    """Update the global channel banner text (Spencer/Data only)."""
+    text: str = Field(description="Banner text to display")
 
 @app.put("/api/v2/admin/banner")
 async def admin_set_banner(token: str, req: BannerUpdate):
@@ -2673,8 +2717,8 @@ heartbeat_checker.start()
 
 
 # --- Message archival job (IMPROVE-010) ---
-MESSAGE_ARCHIVE_DAYS = 30
-MESSAGE_ARCHIVE_INTERVAL = 3600  # Run every hour
+MESSAGE_ARCHIVE_DAYS = int(os.getenv("ACV2_ARCHIVE_DAYS", "30"))
+MESSAGE_ARCHIVE_INTERVAL = int(os.getenv("ACV2_ARCHIVE_INTERVAL", "3600"))  # Run every hour
 
 
 def _archive_old_messages():
