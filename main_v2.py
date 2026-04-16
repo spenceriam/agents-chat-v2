@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -42,7 +42,7 @@ class RateLimiter:
     async def consume(self, agent_name: str, tokens: int = 1) -> bool:
         """Try to consume tokens. Returns True if allowed, False if rate limited."""
         async with self.lock:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if agent_name not in self.buckets:
                 self.buckets[agent_name] = {"tokens": self.max_tokens, "last_refill": now}
             
@@ -59,7 +59,7 @@ class RateLimiter:
     async def get_status(self, agent_name: str) -> dict:
         """Get current rate limit status for an agent."""
         async with self.lock:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if agent_name not in self.buckets:
                 return {"tokens_available": self.max_tokens, "max_tokens": self.max_tokens}
             bucket = self.buckets[agent_name]
@@ -114,7 +114,7 @@ class PresenceManager:
         await self.broadcast_presence(agent_name, "offline")
 
     async def broadcast_presence(self, agent_name: str, status: str):
-        message = {"type": "presence_update", "agent": agent_name, "status": status, "timestamp": datetime.utcnow().isoformat()}
+        message = {"type": "presence_update", "agent": agent_name, "status": status, "timestamp": datetime.now(timezone.utc).isoformat()}
         await self.broadcast_all(message)
 
     async def broadcast_all(self, message: dict):
@@ -153,12 +153,12 @@ class PresenceManager:
     
     async def set_typing(self, agent_name: str):
         async with self.lock:
-            self.typing[agent_name] = datetime.utcnow()
+            self.typing[agent_name] = datetime.now(timezone.utc)
     
     async def record_heartbeat(self, agent_name: str):
         """Record agent heartbeat to confirm liveness."""
         async with self.lock:
-            self.heartbeats[agent_name] = datetime.utcnow()
+            self.heartbeats[agent_name] = datetime.now(timezone.utc)
             # Reset reconnect attempts on heartbeat
             self.reconnect_attempts.pop(agent_name, None)
     
@@ -183,20 +183,80 @@ class PresenceManager:
             last_heartbeat = self.heartbeats.get(agent_name)
             last_seen = get_presence_last_seen(agent_name)
             # Check heartbeat staleness first
-            if last_heartbeat and (datetime.utcnow() - last_heartbeat).total_seconds() > HEARTBEAT_TIMEOUT_SECONDS:
+            if last_heartbeat and (datetime.now(timezone.utc) - last_heartbeat).total_seconds() > HEARTBEAT_TIMEOUT_SECONDS:
                 return "away"
-            if last_typing and (datetime.utcnow() - last_typing).total_seconds() < 120:
+            if last_typing and (datetime.now(timezone.utc) - last_typing).total_seconds() < 120:
                 return "online"
-            if last_seen and (datetime.utcnow() - last_seen).total_seconds() < PRESENCE_AWAY_MINUTES * 60:
+            if last_seen and (datetime.now(timezone.utc) - last_seen).total_seconds() < PRESENCE_AWAY_MINUTES * 60:
                 return "online"
             return "away"
         # Check if recently disconnected (heartbeat still valid)
         last_heartbeat = self.heartbeats.get(agent_name)
-        if last_heartbeat and (datetime.utcnow() - last_heartbeat).total_seconds() < HEARTBEAT_TIMEOUT_SECONDS:
+        if last_heartbeat and (datetime.now(timezone.utc) - last_heartbeat).total_seconds() < HEARTBEAT_TIMEOUT_SECONDS:
             return "away"
         return "offline"
 
 presence_mgr = PresenceManager()
+
+
+# --- API Metrics (IMPROVE-011) ---
+class APIMetrics:
+    """In-memory request metrics for monitoring ACV2 health."""
+    def __init__(self):
+        self.request_count = 0
+        self.error_count = 0
+        self.broadcast_count = 0
+        self.broadcast_total_latency_ms = 0.0
+        self.message_count = 0
+        self.ws_connections = 0
+        self.start_time = datetime.now(timezone.utc)
+        self.lock = threading.Lock()
+
+    def record_request(self):
+        with self.lock:
+            self.request_count += 1
+
+    def record_error(self):
+        with self.lock:
+            self.error_count += 1
+
+    def record_broadcast(self, subscriber_count: int, latency_ms: float):
+        with self.lock:
+            self.broadcast_count += 1
+            self.broadcast_total_latency_ms += latency_ms
+
+    def record_message(self):
+        with self.lock:
+            self.message_count += 1
+
+    def record_ws_connect(self):
+        with self.lock:
+            self.ws_connections += 1
+
+    def record_ws_disconnect(self):
+        with self.lock:
+            self.ws_connections = max(0, self.ws_connections - 1)
+
+    def get_stats(self) -> dict:
+        with self.lock:
+            uptime = (datetime.now(timezone.utc) - self.start_time).total_seconds()
+            avg_broadcast_ms = (
+                self.broadcast_total_latency_ms / self.broadcast_count
+                if self.broadcast_count > 0 else 0
+            )
+            return {
+                "uptime_seconds": round(uptime, 1),
+                "total_requests": self.request_count,
+                "total_errors": self.error_count,
+                "error_rate": round(self.error_count / max(1, self.request_count) * 100, 2),
+                "messages_sent": self.message_count,
+                "broadcasts": self.broadcast_count,
+                "avg_broadcast_latency_ms": round(avg_broadcast_ms, 2),
+                "active_ws_connections": self.ws_connections,
+            }
+
+
+metrics = APIMetrics()
 
 
 def init_db():
@@ -457,7 +517,7 @@ def set_presence(agent_name: str, status: str, current_room: str = None, status_
     cursor = conn.cursor()
     # Build dynamic update for optional fields
     updates = ["status=excluded.status", "last_seen=excluded.last_seen", "current_room=excluded.current_room"]
-    values = [agent_name, status, datetime.utcnow().isoformat(), current_room]
+    values = [agent_name, status, datetime.now(timezone.utc).isoformat(), current_room]
     
     if status_detail is not None:
         updates.append("status_detail=excluded.status_detail")
@@ -965,8 +1025,9 @@ def save_thread_message(thread_id: str, room_id: str, sender: str, content: str,
          requires_human, mentions_spencer, image_url, image_type)
     )
     conn.commit()
-    conn.close()
+    # Create notifications for message
     create_notifications_for_message(msg_id, room_id, sender, content, mentions_spencer)
+    metrics.record_message()
     return msg_id
 
 
@@ -986,8 +1047,9 @@ def save_message(room_id: str, sender: str, content: str, structured: dict = Non
     conn.commit()
     conn.close()
     
-    # Create notifications for mentions and DMs
+    # Create notifications for message
     create_notifications_for_message(msg_id, room_id, sender, content, mentions_spencer)
+    metrics.record_message()
     return msg_id
 
 
@@ -1062,7 +1124,7 @@ async def notify_mentions_ws(room_id: str, sender: str, content: str, message_id
                     "room_id": room_id,
                     "message_id": message_id,
                     "content_preview": content[:200],
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 })
             except Exception:
                 pass
@@ -1088,7 +1150,7 @@ async def notify_mentions_ws(room_id: str, sender: str, content: str, message_id
                         "room_id": room_id,
                         "message_id": message_id,
                         "content_preview": content[:200],
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     })
                 except Exception:
                     pass
@@ -1099,10 +1161,10 @@ def get_room_messages(room_id: str, limit: int = 50, before_id: str = None) -> L
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
+
     if before_id:
         cursor.execute(
-            """SELECT * FROM messages WHERE room_id = ? AND timestamp < 
+            """SELECT * FROM messages WHERE room_id = ? AND timestamp <
                (SELECT timestamp FROM messages WHERE id = ?)
                ORDER BY timestamp DESC LIMIT ?""",
             (room_id, before_id, limit)
@@ -1112,20 +1174,34 @@ def get_room_messages(room_id: str, limit: int = 50, before_id: str = None) -> L
             """SELECT * FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT ?""",
             (room_id, limit)
         )
-    
+
     rows = cursor.fetchall()
     messages = []
     for row in reversed(rows):
         msg = dict(row)
         if msg.get("structured"):
             msg["structured"] = json.loads(msg["structured"])
-        # Include reactions for each message
-        cursor.execute(
-            "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
-            (msg["id"],)
-        )
-        msg["reactions"] = [{"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")} for r in cursor.fetchall()]
+        msg["reactions"] = []
         messages.append(msg)
+
+    # Batch load reactions for all messages in a single query (fixes N+1)
+    if messages:
+        msg_ids = [m["id"] for m in messages]
+        placeholders = ",".join("?" * len(msg_ids))
+        cursor.execute(
+            f"SELECT message_id, emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents "
+            f"FROM message_reactions WHERE message_id IN ({placeholders}) "
+            f"GROUP BY message_id, emoji ORDER BY count DESC",
+            msg_ids
+        )
+        reactions_by_msg: Dict[str, list] = {}
+        for r in cursor.fetchall():
+            reactions_by_msg.setdefault(r["message_id"], []).append(
+                {"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")}
+            )
+        for msg in messages:
+            msg["reactions"] = reactions_by_msg.get(msg["id"], [])
+
     conn.close()
     return messages
 
@@ -1249,6 +1325,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Agent Chat v2", lifespan=lifespan)
 
+
+# Middleware: count all API requests
+@app.middleware("http")
+async def count_requests(request: Request, call_next):
+    metrics.record_request()
+    try:
+        response = await call_next(request)
+        return response
+    except Exception:
+        metrics.record_error()
+        raise
+
+
 # Serve v2 chat UI
 @app.get("/v2")
 async def v2_ui():
@@ -1258,7 +1347,7 @@ async def v2_ui():
 
 @app.get("/api/v2/health")
 async def health_check():
-    return {"status": "ok", "version": "2.0.0", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/v2/me")
@@ -1320,7 +1409,7 @@ async def upload_screenshot(token: str, req: UploadImageRequest):
     ext = ".png" if req.content_type == "image/png" else ".jpg" if req.content_type == "image/jpeg" else ".gif" if req.content_type == "image/gif" else ".webp"
     
     # Generate unique filename
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     unique_name = f"{agent['name']}_{timestamp}_{safe_name}{ext}"
     screenshots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
     os.makedirs(screenshots_dir, exist_ok=True)
@@ -1373,7 +1462,7 @@ async def add_reaction_endpoint(msg_id: str, token: str, req: ReactionRequest):
         "agent_name": agent["name"],
         "emoji": req.emoji,
         "reactions": result["reactions"],
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }))
     return result
 
@@ -1393,7 +1482,7 @@ async def remove_reaction_endpoint(msg_id: str, emoji: str, token: str):
         "agent_name": agent["name"],
         "emoji": emoji,
         "reactions": result["reactions"],
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }))
     return result
 
@@ -1430,7 +1519,7 @@ async def pin_endpoint(room_id: str, token: str, req: PinRequest):
         "message_id": req.message_id,
         "pinned_by": agent["name"],
         "pin": result,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }))
     return result
 
@@ -1449,7 +1538,7 @@ async def unpin_endpoint(room_id: str, message_id: str, token: str):
         "room_id": room_id,
         "message_id": message_id,
         "unpinned_by": agent["name"],
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }))
     return {"status": "unpinned", "room_id": room_id, "message_id": message_id}
 
@@ -1546,7 +1635,7 @@ async def edit_channel_message(room_id: str, msg_id: str, token: str, req: SendM
         await broadcast_to_room(room_id, {
             "type": "message", "edit": True, "id": msg_id,
             "room_id": room_id, "sender": agent["name"], "content": req.content,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         return {"status": "edited"}
     raise HTTPException(status_code=404, detail="Message not found or already deleted")
@@ -1565,7 +1654,7 @@ async def delete_channel_message(room_id: str, msg_id: str, token: str):
         await broadcast_to_room(room_id, {
             "type": "message", "delete": True, "id": msg_id,
             "room_id": room_id, "sender": agent["name"],
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="Message not found")
@@ -1585,7 +1674,7 @@ async def create_thread_endpoint(channel_id: str, token: str, req: CreateThreadR
     await broadcast_to_room(channel_id, {
         "type": "thread_created",
         "thread": thread,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
     return {"status": "created", "thread": thread}
 
@@ -1654,7 +1743,7 @@ async def archive_thread_endpoint(thread_id: str, token: str):
         await broadcast_to_room(thread["parent_channel_id"], {
             "type": "thread_archived",
             "thread_id": thread_id,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         return {"status": "archived"}
     raise HTTPException(status_code=404, detail="Thread not found")
@@ -1698,7 +1787,7 @@ async def send_thread_message(thread_id: str, token: str, req: SendThreadMessage
         "mentions_spencer": mentions_spencer,
         "image_url": req.image_url,
         "image_type": req.image_type,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
 
     return {"status": "sent", "id": msg_id, "thread_id": thread_id}
@@ -1736,7 +1825,7 @@ async def edit_thread_message(thread_id: str, msg_id: str, token: str, req: Send
             "type": "message", "edit": True, "id": msg_id,
             "room_id": thread["parent_channel_id"], "thread_id": thread_id,
             "sender": agent["name"], "content": req.content,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         return {"status": "edited"}
     raise HTTPException(status_code=404, detail="Message not found or already deleted")
@@ -1759,7 +1848,7 @@ async def delete_thread_message(thread_id: str, msg_id: str, token: str):
             "type": "message", "delete": True, "id": msg_id,
             "room_id": thread["parent_channel_id"], "thread_id": thread_id,
             "sender": agent["name"],
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="Message not found")
@@ -1795,7 +1884,7 @@ async def send_channel_message(room_id: str, token: str, req: SendMessageRequest
         "mentions_spencer": mentions_spencer,
         "image_url": req.image_url,
         "image_type": req.image_type,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
     
     return {"status": "sent", "id": msg_id}
@@ -1858,7 +1947,7 @@ async def edit_dm_message(other_agent: str, msg_id: str, token: str, req: SendMe
         await broadcast_to_room(room_id, {
             "type": "message", "edit": True, "id": msg_id,
             "room_id": room_id, "sender": agent["name"], "content": req.content,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         return {"status": "edited"}
     raise HTTPException(status_code=404, detail="Message not found or already deleted")
@@ -1881,7 +1970,7 @@ async def delete_dm_message(other_agent: str, msg_id: str, token: str):
         await broadcast_to_room(room_id, {
             "type": "message", "delete": True, "id": msg_id,
             "room_id": room_id, "sender": agent["name"],
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
         return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="Message not found")
@@ -1921,7 +2010,7 @@ async def send_dm_message(other_agent: str, token: str, req: SendMessageRequest)
         "mentions_spencer": mentions_spencer,
         "image_url": req.image_url,
         "image_type": req.image_type,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
 
     return {"status": "sent", "id": msg_id, "room_id": room_id}
@@ -2006,7 +2095,7 @@ async def send_heartbeat(token: str):
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
     await presence_mgr.record_heartbeat(agent["name"])
-    return {"status": "ok", "agent": agent["name"], "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "agent": agent["name"], "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/v2/presence/reconnect")
@@ -2089,6 +2178,19 @@ async def admin_set_banner(token: str, req: BannerUpdate):
     return {"status": "updated", "text": req.text}
 
 
+@app.get("/api/v2/metrics")
+async def get_metrics(token: str):
+    """Get API health metrics — request counts, broadcast latency, connection stats."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    stats = metrics.get_stats()
+    # Add real-time presence stats
+    stats["total_agents"] = len(presence_mgr.connections)
+    stats["total_heartbeats_tracked"] = len(presence_mgr.heartbeats)
+    return stats
+
+
 @app.post("/api/v2/webhooks/register")
 async def register_webhook(token: str, req: WebhookRegisterRequest):
     agent = get_agent_by_token(token)
@@ -2129,6 +2231,7 @@ async def broadcast_to_room(room_id: str, message: dict):
     subscribers = await presence_mgr.get_subscribers(room_id)
     print(f"[Broadcast] room={room_id} subscribers={len(subscribers)}")
     disconnected = []
+    start = time.monotonic()
     for agent_name, websocket in subscribers:
         try:
             await websocket.send_json(message)
@@ -2140,7 +2243,9 @@ async def broadcast_to_room(room_id: str, message: dict):
         except Exception as e:
             print(f"[Broadcast] failed to send to {agent_name}: {e}")
             disconnected.append((agent_name, websocket))
-    
+    latency_ms = (time.monotonic() - start) * 1000
+    metrics.record_broadcast(len(subscribers), latency_ms)
+
     for agent_name, ws in disconnected:
         await presence_mgr.disconnect(agent_name, ws)
 
@@ -2162,6 +2267,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         reconnect_info = await presence_mgr.handle_reconnect(agent_name)
     
     await presence_mgr.connect(agent_name, websocket)
+    metrics.record_ws_connect()
     
     try:
         # Auto-join agent to default channels
@@ -2184,7 +2290,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "agent": agent_name,
             "rooms": room_ids,
             "banner": get_banner(),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         if reconnect_info:
             welcome_msg["reconnect"] = reconnect_info
@@ -2241,7 +2347,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "type": "system",
                             "event": "ack_recorded",
                             "message_id": message_id,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                         # Check if all recipients have acked, notify the sender
                         ack_status = get_message_ack_status(message_id)
@@ -2259,7 +2365,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                     "event": "message_delivered",
                                     "message_id": message_id,
                                     "all_recipients_acked": True,
-                                    "timestamp": datetime.utcnow().isoformat()
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
                                 }
                                 for ws in presence_mgr.connections.get(sender_name, []):
                                     try:
@@ -2288,7 +2394,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "agent_name": agent_name,
                             "emoji": emoji,
                             "reactions": result["reactions"],
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
 
                 elif action == "pin":
@@ -2306,7 +2412,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "room_id": room_id,
                             "message_id": message_id,
                             "unpinned_by": agent_name,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                     else:
                         result = pin_message(message_id, room_id, agent_name)
@@ -2318,7 +2424,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                 "message_id": message_id,
                                 "pinned_by": agent_name,
                                 "pin": result,
-                                "timestamp": datetime.utcnow().isoformat()
+                                "timestamp": datetime.now(timezone.utc).isoformat()
                             })
                 
                 elif action == "send":
@@ -2327,7 +2433,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "type": "system",
                             "event": "rate_limited",
                             "detail": "Too many messages. Slow down.",
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                         continue
                     
@@ -2354,7 +2460,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "mentions_spencer": mentions_spencer,
                         "image_url": image_url,
                         "image_type": image_type,
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     })
                     # Confirm message was sent and broadcast
                     await websocket.send_json({
@@ -2362,7 +2468,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "event": "message_sent",
                         "message_id": msg_id,
                         "room_id": room_id,
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     })
 
                 elif action == "presence":
@@ -2389,7 +2495,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "type": "system",
                             "event": "rate_limited",
                             "detail": "Too many messages. Slow down.",
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                         continue
 
@@ -2414,7 +2520,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "mentions_spencer": mentions_spencer,
                             "image_url": image_url,
                             "image_type": image_type,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                         # Notify sender via ack that thread message was broadcast
                         await websocket.send_json({
@@ -2422,7 +2528,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "event": "message_sent",
                             "message_id": msg_id,
                             "thread_id": thread_id,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
                 
             except json.JSONDecodeError:
@@ -2430,9 +2536,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     
     except WebSocketDisconnect:
         await presence_mgr.disconnect(agent_name, websocket)
+        metrics.record_ws_disconnect()
     except Exception as e:
         print(f"WebSocket error for {agent_name}: {e}")
         await presence_mgr.disconnect(agent_name, websocket)
+        metrics.record_ws_disconnect()
 
 
 # --- Spencer Relay Endpoint (Data only) ---
@@ -2462,7 +2570,7 @@ HTML_PATH = os.path.join(os.path.dirname(__file__), "v2_chat.html")
 _html_last_mtime = os.path.getmtime(HTML_PATH)
 
 async def _broadcast_reload():
-    await presence_mgr.broadcast_all({"type": "reload", "timestamp": datetime.utcnow().isoformat()})
+    await presence_mgr.broadcast_all({"type": "reload", "timestamp": datetime.now(timezone.utc).isoformat()})
 
 def _watch_html():
     global _html_last_mtime
@@ -2488,7 +2596,7 @@ def _check_heartbeat_timeouts():
     while True:
         time.sleep(HEARTBEAT_TIMEOUT_SECONDS)
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             stale_agents = []
             for agent_name, last_hb in list(presence_mgr.heartbeats.items()):
                 if (now - last_hb).total_seconds() > HEARTBEAT_TIMEOUT_SECONDS:
@@ -2511,6 +2619,38 @@ def _check_heartbeat_timeouts():
 
 heartbeat_checker = threading.Thread(target=_check_heartbeat_timeouts, daemon=True)
 heartbeat_checker.start()
+
+
+# --- Message archival job (IMPROVE-010) ---
+MESSAGE_ARCHIVE_DAYS = 30
+MESSAGE_ARCHIVE_INTERVAL = 3600  # Run every hour
+
+
+def _archive_old_messages():
+    """Periodically soft-delete messages older than MESSAGE_ARCHIVE_DAYS."""
+    while True:
+        time.sleep(MESSAGE_ARCHIVE_INTERVAL)
+        try:
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE messages SET is_deleted = TRUE, content = '[archived]'
+                   WHERE is_deleted = FALSE
+                   AND timestamp < datetime('now', ?)
+                   AND requires_human = FALSE""",
+                (f"-{MESSAGE_ARCHIVE_DAYS} days",)
+            )
+            archived = cursor.rowcount
+            conn.commit()
+            conn.close()
+            if archived > 0:
+                print(f"[Archive] Soft-deleted {archived} messages older than {MESSAGE_ARCHIVE_DAYS} days")
+        except Exception as e:
+            print(f"[Archive] Error: {e}")
+
+
+archive_thread = threading.Thread(target=_archive_old_messages, daemon=True)
+archive_thread.start()
 
 
 if __name__ == "__main__":
