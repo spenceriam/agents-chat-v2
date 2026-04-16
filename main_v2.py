@@ -12,6 +12,7 @@ import uuid
 import asyncio
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Query
@@ -284,6 +285,45 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_acks (
+            message_id TEXT REFERENCES messages(id),
+            agent_name TEXT,
+            acked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (message_id, agent_name)
+        )
+    ''')
+
+
+    # FTS5 full-text search
+    cursor.execute('''
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            content, sender, room_id,
+            tokenize='unicode61'
+        )
+    ''')
+    # Rebuild FTS index from existing messages
+    cursor.execute("INSERT OR IGNORE INTO messages_fts(rowid, content, sender, room_id) SELECT rowid, content, sender, room_id FROM messages")
+
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS archived_messages (
+            id TEXT PRIMARY KEY, room_id TEXT, thread_id TEXT, sender TEXT, content TEXT,
+            structured TEXT, requires_human BOOLEAN DEFAULT FALSE, mentions_spencer BOOLEAN DEFAULT FALSE,
+            timestamp DATETIME, is_deleted BOOLEAN DEFAULT FALSE, edited_at DATETIME,
+            archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS screenshots (
+            id TEXT PRIMARY KEY, agent_name TEXT, room_id TEXT, filename TEXT,
+            content_type TEXT DEFAULT 'image/png', uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -813,7 +853,63 @@ def get_dm_room_id(agent_a: str, agent_b: str) -> Optional[str]:
     return room_id if room else None
 
 
+
+
+# --- Metrics ---
+api_metrics = {"total_requests": 0, "total_errors": 0, "requests_by_endpoint": defaultdict(int), "start_time": time.time()}
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    api_metrics["total_requests"] += 1
+    api_metrics["requests_by_endpoint"][request.url.path] += 1
+    try:
+        return await call_next(request)
+    except Exception:
+        api_metrics["total_errors"] += 1
+        raise
+
+# --- Rate Limiting ---
+
+class RateLimiter:
+    def __init__(self, max_requests=120, window_seconds=60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, list] = defaultdict(list)
+    
+    def is_allowed(self, key: str) -> bool:
+        now = time.time()
+        self.requests[key] = [t for t in self.requests[key] if now - t < self.window_seconds]
+        if len(self.requests[key]) >= self.max_requests:
+            return False
+        self.requests[key].append(now)
+        return True
+    
+    def get_remaining(self, key: str) -> int:
+        now = time.time()
+        self.requests[key] = [t for t in self.requests[key] if now - t < self.window_seconds]
+        return max(0, self.max_requests - len(self.requests[key]))
+
+rate_limiter = RateLimiter(max_requests=120, window_seconds=60)
+
+from fastapi.responses import JSONResponse
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path in ("/api/v2/health", "/v2", "/docs", "/openapi.json", "/redoc"):
+        return await call_next(request)
+    token = request.query_params.get("token", "")
+    agent = get_agent_by_token(token) if token else None
+    key = agent["name"] if agent else request.client.host
+    if not rate_limiter.is_allowed(key):
+        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded", "retry_after": 60})
+    response = await call_next(request)
+    remaining = rate_limiter.get_remaining(key)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    response.headers["X-RateLimit-Limit"] = "120"
+    return response
+
 # Pydantic models
+
 class SendMessageRequest(BaseModel):
     content: str
     structured: Optional[dict] = None
@@ -1426,7 +1522,209 @@ async def unregister_webhook(token: str):
     return {"status": "unregistered"}
 
 
+
+@app.post("/api/v2/typing")
+async def send_typing(token: str, room_id: str = "general"):
+    """HTTP endpoint for typing indicators."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    await presence_mgr.set_typing(agent["name"])
+    await broadcast_to_room(room_id, {
+        "type": "typing",
+        "agent": agent["name"],
+        "room_id": room_id,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+    return {"status": "ok", "agent": agent["name"], "room_id": room_id}
+
+
+@app.post("/api/v2/messages/{msg_id}/ack")
+async def ack_message(msg_id: str, token: str):
+    """Acknowledge message delivery."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO message_acks (message_id, agent_name) VALUES (?, ?)", (msg_id, agent["name"]))
+    conn.commit()
+    conn.close()
+    return {"status": "acked", "message_id": msg_id, "agent": agent["name"]}
+
+@app.get("/api/v2/messages/{msg_id}/acks")
+async def get_message_acks(msg_id: str, token: str):
+    """Get delivery acknowledgments for a message."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT agent_name, acked_at FROM message_acks WHERE message_id = ? ORDER BY acked_at", (msg_id,))
+    acks = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return {"message_id": msg_id, "acks": acks, "count": len(acks)}
+
+@app.get("/api/v2/messages/unacked")
+async def get_unacked_messages(token: str, room_id: str = None):
+    """Get messages that haven't been acknowledged."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    conn = get_db()
+    cursor = conn.cursor()
+    if room_id:
+        cursor.execute(
+            "SELECT m.id, m.room_id, m.sender, m.content, m.timestamp FROM messages m WHERE m.room_id = ? AND m.sender = ? AND m.id NOT IN (SELECT message_id FROM message_acks WHERE agent_name = ?) ORDER BY m.timestamp DESC LIMIT 50",
+            (room_id, agent["name"], agent["name"]))
+    else:
+        cursor.execute(
+            "SELECT m.id, m.room_id, m.sender, m.content, m.timestamp FROM messages m WHERE m.sender = ? AND m.id NOT IN (SELECT message_id FROM message_acks WHERE agent_name = ?) ORDER BY m.timestamp DESC LIMIT 50",
+            (agent["name"], agent["name"]))
+    messages = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return {"unacked": messages, "count": len(messages)}
+
+
+@app.post("/api/v2/search")
+async def search_messages(token: str, query: str = "", room_id: str = None, limit: int = 50):
+    """Full-text search across messages using FTS5."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    if not query:
+        raise HTTPException(status_code=400, detail="Query parameter required")
+    conn = get_db()
+    cursor = conn.cursor()
+    if room_id:
+        cursor.execute(
+            "SELECT m.id, m.room_id, m.sender, m.content, m.structured, m.timestamp, m.requires_human, m.mentions_spencer, m.is_deleted, m.edited_at FROM messages m JOIN messages_fts f ON m.rowid = f.rowid WHERE m.room_id = ? AND messages_fts MATCH ? AND m.is_deleted = FALSE ORDER BY rank DESC LIMIT ?",
+            (room_id, query, limit))
+    else:
+        cursor.execute(
+            "SELECT m.id, m.room_id, m.sender, m.content, m.structured, m.timestamp, m.requires_human, m.mentions_spencer, m.is_deleted, m.edited_at FROM messages m JOIN messages_fts f ON m.rowid = f.rowid WHERE messages_fts MATCH ? AND m.is_deleted = FALSE ORDER BY rank DESC LIMIT ?",
+            (query, limit))
+    results = []
+    for row in cursor.fetchall():
+        msg = dict(row)
+        if msg.get("structured"):
+            msg["structured"] = json.loads(msg["structured"])
+        results.append(msg)
+    conn.close()
+    return {"query": query, "results": results, "count": len(results)}
+
+
+@app.get("/api/v2/metrics")
+async def get_metrics(token: str):
+    """Get API performance metrics."""
+    agent = get_agent_by_token(token)
+    if not agent or agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Admin only")
+    uptime = time.time() - api_metrics["start_time"]
+    return {
+        "uptime_seconds": round(uptime, 1),
+        "total_requests": api_metrics["total_requests"],
+        "total_errors": api_metrics["total_errors"],
+        "requests_by_endpoint": dict(api_metrics["requests_by_endpoint"]),
+        "error_rate": round(api_metrics["total_errors"] / max(api_metrics["total_requests"], 1) * 100, 2),
+        "requests_per_second": round(api_metrics["total_requests"] / max(uptime, 1), 2),
+    }
+
+
+@app.post("/api/v2/admin/archive")
+async def archive_old_messages(token: str, days: int = 30):
+    """Archive messages older than N days."""
+    agent = get_agent_by_token(token)
+    if not agent or agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Admin only")
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO archived_messages SELECT *, CURRENT_TIMESTAMP FROM messages WHERE timestamp < datetime('now', ?)", (f'-{days} days',))
+    archived_count = cursor.rowcount
+    cursor.execute("DELETE FROM messages WHERE timestamp < datetime('now', ?)", (f'-{days} days',))
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return {"status": "archived", "archived_count": archived_count, "deleted_from_main": deleted_count}
+
+@app.get("/api/v2/admin/archive/stats")
+async def get_archive_stats(token: str):
+    """Get archive statistics."""
+    agent = get_agent_by_token(token)
+    if not agent or agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Admin only")
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) as count FROM archived_messages")
+    archived = cursor.fetchone()["count"]
+    cursor.execute("SELECT COUNT(*) as count FROM messages")
+    active = cursor.fetchone()["count"]
+    conn.close()
+    return {"active_messages": active, "archived_messages": archived}
+
+
+# --- Screenshot Support ---
+SCREENSHOT_DIR = os.getenv("ACV2_SCREENSHOT_DIR", "screenshots")
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+@app.post("/api/v2/screenshots")
+async def upload_screenshot(token: str, room_id: str = "general"):
+    """Upload a screenshot (base64 encoded)."""
+    import base64
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    body = await request.json()
+    image_data = body.get("image", "")
+    content_type = body.get("content_type", "image/png")
+    if not image_data:
+        raise HTTPException(status_code=400, detail="image data required")
+    screenshot_id = str(uuid.uuid4())
+    ext = "png" if "png" in content_type else "jpg"
+    filename = f"{screenshot_id}.{ext}"
+    filepath = os.path.join(SCREENSHOT_DIR, filename)
+    if image_data.startswith("data:"):
+        image_data = image_data.split(",")[1]
+    with open(filepath, "wb") as f:
+        f.write(base64.b64decode(image_data))
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO screenshots (id, agent_name, room_id, filename, content_type) VALUES (?, ?, ?, ?, ?)", (screenshot_id, agent["name"], room_id, filename, content_type))
+    conn.commit()
+    conn.close()
+    return {"status": "uploaded", "id": screenshot_id, "filename": filename, "url": f"/api/v2/screenshots/{filename}"}
+
+@app.get("/api/v2/screenshots/{filename}")
+async def get_screenshot(filename: str):
+    """Serve a screenshot file."""
+    filepath = os.path.join(SCREENSHOT_DIR, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return FileResponse(filepath)
+
+@app.get("/api/v2/screenshots")
+async def list_screenshots(token: str, room_id: str = None, limit: int = 50):
+    """List uploaded screenshots."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    conn = get_db()
+    cursor = conn.cursor()
+    if room_id:
+        cursor.execute("SELECT * FROM screenshots WHERE room_id = ? ORDER BY uploaded_at DESC LIMIT ?", (room_id, limit))
+    else:
+        cursor.execute("SELECT * FROM screenshots ORDER BY uploaded_at DESC LIMIT ?", (limit,))
+    screenshots = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return {"screenshots": screenshots, "count": len(screenshots)}
+
 # --- WebSocket ---
+
+
+
+
+
+
 
 async def broadcast_to_room(room_id: str, message: dict):
     subscribers = await presence_mgr.get_subscribers(room_id)
