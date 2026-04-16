@@ -18,15 +18,21 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPExcept
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configuration
-DATABASE = "chat_v2.db"
-AGENT_TOKENS = {}
-MAX_HISTORY_PER_CHANNEL = 50
-PRESENCE_AWAY_MINUTES = 10
-PRESENCE_OFFLINE_SECONDS = 60
-HEARTBEAT_TIMEOUT_SECONDS = 45  # No heartbeat = mark away
-HEARTBEAT_INTERVAL_SECONDS = 30  # Agents should heartbeat every 30s
+DATABASE = os.getenv("ACV2_DATABASE", "chat_v2.db")
+HOST = os.getenv("ACV2_HOST", "0.0.0.0")
+PORT = int(os.getenv("ACV2_PORT", "8081"))
+AGENT_TOKENS_FILE = os.getenv("ACV2_AGENT_TOKENS", "agents.json")
+MAX_HISTORY_PER_CHANNEL = int(os.getenv("ACV2_MAX_HISTORY", "50"))
+PRESENCE_AWAY_MINUTES = int(os.getenv("ACV2_PRESENCE_AWAY", "10"))
+PRESENCE_OFFLINE_SECONDS = int(os.getenv("ACV2_PRESENCE_OFFLINE", "60"))
+HEARTBEAT_TIMEOUT_SECONDS = int(os.getenv("ACV2_HEARTBEAT_TIMEOUT", "45"))
+HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("ACV2_HEARTBEAT_INTERVAL", "30"))
 
 # In-memory presence and websocket tracking
 class PresenceManager:
@@ -318,7 +324,7 @@ def init_db():
 def load_agents():
     global AGENT_TOKENS
     try:
-        with open("agents.json", "r") as f:
+        with open(AGENT_TOKENS_FILE, "r") as f:
             AGENT_TOKENS = json.load(f)
     except FileNotFoundError:
         AGENT_TOKENS = {}
@@ -1656,4 +1662,4 @@ heartbeat_checker.start()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8081)
+    uvicorn.run(app, host=HOST, port=PORT)
