@@ -29,6 +29,47 @@ HEARTBEAT_TIMEOUT_SECONDS = 45  # No heartbeat = mark away
 HEARTBEAT_INTERVAL_SECONDS = 30  # Agents should heartbeat every 30s
 
 # In-memory presence and websocket tracking
+class RateLimiter:
+    """Simple token-bucket rate limiter per agent."""
+    def __init__(self, max_tokens: int = 10, refill_rate: float = 1.0):
+        # max_tokens: max burst size, refill_rate: tokens per second
+        self.max_tokens = max_tokens
+        self.refill_rate = refill_rate
+        self.buckets: Dict[str, dict] = {}  # agent_name -> {"tokens": float, "last_refill": datetime}
+        self.lock = asyncio.Lock()
+    
+    async def consume(self, agent_name: str, tokens: int = 1) -> bool:
+        """Try to consume tokens. Returns True if allowed, False if rate limited."""
+        async with self.lock:
+            now = datetime.utcnow()
+            if agent_name not in self.buckets:
+                self.buckets[agent_name] = {"tokens": self.max_tokens, "last_refill": now}
+            
+            bucket = self.buckets[agent_name]
+            elapsed = (now - bucket["last_refill"]).total_seconds()
+            bucket["tokens"] = min(self.max_tokens, bucket["tokens"] + elapsed * self.refill_rate)
+            bucket["last_refill"] = now
+            
+            if bucket["tokens"] >= tokens:
+                bucket["tokens"] -= tokens
+                return True
+            return False
+    
+    async def get_status(self, agent_name: str) -> dict:
+        """Get current rate limit status for an agent."""
+        async with self.lock:
+            now = datetime.utcnow()
+            if agent_name not in self.buckets:
+                return {"tokens_available": self.max_tokens, "max_tokens": self.max_tokens}
+            bucket = self.buckets[agent_name]
+            elapsed = (now - bucket["last_refill"]).total_seconds()
+            available = min(self.max_tokens, bucket["tokens"] + elapsed * self.refill_rate)
+            return {"tokens_available": round(available, 1), "max_tokens": self.max_tokens, 
+                    "refill_rate": self.refill_rate}
+
+rate_limiter = RateLimiter(max_tokens=10, refill_rate=1.0)  # 10 burst, 1/sec refill
+
+
 class PresenceManager:
     def __init__(self):
         self.connections: Dict[str, List[WebSocket]] = {}  # agent_name -> [websockets]
@@ -235,6 +276,47 @@ def init_db():
         )
     ''')
 
+    # Enhanced presence columns
+    try:
+        cursor.execute("ALTER TABLE presence ADD COLUMN status_detail TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE presence ADD COLUMN status_message TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+
+    # FTS5 message search
+    cursor.execute('''
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            content, sender, room_id,
+            content='messages', content_rowid='rowid',
+            tokenize='porter unicode61'
+        )
+    ''')
+
+    # Triggers to keep FTS index in sync
+    cursor.execute('''
+        CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content, sender, room_id)
+            VALUES (NEW.rowid, NEW.content, NEW.sender, NEW.room_id);
+        END
+    ''')
+    cursor.execute('''
+        CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content, sender, room_id)
+            VALUES ('delete', OLD.rowid, OLD.content, OLD.sender, OLD.room_id);
+        END
+    ''')
+    cursor.execute('''
+        CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content, sender, room_id)
+            VALUES ('delete', OLD.rowid, OLD.content, OLD.sender, OLD.room_id);
+            INSERT INTO messages_fts(rowid, content, sender, room_id)
+            VALUES (NEW.rowid, NEW.content, NEW.sender, NEW.room_id);
+        END
+    ''')
+
     # Thread/subchannel tables (FEAT-001 Phase 1)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS threads (
@@ -294,6 +376,15 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_ack (
+            message_id TEXT REFERENCES messages(id),
+            agent_name TEXT,
+            acked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (message_id, agent_name)
+        )
+    ''')
+
     # Migration: add edit/delete columns to messages if missing
     try:
         cursor.execute("ALTER TABLE messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE")
@@ -321,15 +412,34 @@ def get_agent_by_token(token: str) -> Optional[dict]:
     return AGENT_TOKENS.get(token)
 
 
-def set_presence(agent_name: str, status: str, current_room: str = None):
+def set_presence(agent_name: str, status: str, current_room: str = None, status_detail: str = None, status_message: str = None):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
+    # Build dynamic update for optional fields
+    updates = ["status=excluded.status", "last_seen=excluded.last_seen", "current_room=excluded.current_room"]
+    values = [agent_name, status, datetime.utcnow().isoformat(), current_room]
+    
+    if status_detail is not None:
+        updates.append("status_detail=excluded.status_detail")
+        values.append(status_detail)
+    
+    if status_message is not None:
+        updates.append("status_message=excluded.status_message")
+        values.append(status_message)
+    
+    placeholders = ", ".join(["?"] * len(values))
+    cols = "agent_name, status, last_seen, current_room"
+    if status_detail is not None:
+        cols += ", status_detail"
+    if status_message is not None:
+        cols += ", status_message"
+    
     cursor.execute(
-        """INSERT INTO presence (agent_name, status, last_seen, current_room)
-           VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+        f"""INSERT INTO presence ({cols})
+           VALUES ({placeholders})
            ON CONFLICT(agent_name) DO UPDATE SET
-           status=excluded.status, last_seen=excluded.last_seen, current_room=excluded.current_room""",
-        (agent_name, status, current_room)
+           {", ".join(updates)}""",
+        values
     )
     conn.commit()
     conn.close()
@@ -351,7 +461,7 @@ def get_all_presence() -> List[dict]:
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT agent_name, status, last_seen, current_room FROM presence")
+    cursor.execute("SELECT agent_name, status, last_seen, current_room, status_detail, status_message FROM presence")
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -369,6 +479,115 @@ def mark_room_read(agent_name: str, room_id: str):
     )
     conn.commit()
     conn.close()
+
+
+def record_message_ack(message_id: str, agent_name: str):
+    """Record that an agent has acknowledged receiving a message."""
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO message_ack (message_id, agent_name, acked_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(message_id, agent_name) DO UPDATE SET
+           acked_at = excluded.acked_at""",
+        (message_id, agent_name)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_message_ack_status(message_id: str) -> dict:
+    """Get acknowledgment status for a message: who has acked it."""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT agent_name, acked_at FROM message_ack WHERE message_id = ? ORDER BY acked_at",
+        (message_id,)
+    )
+    acks = [dict(r) for r in cursor.fetchall()]
+    cursor.execute(
+        "SELECT rm.agent_name FROM room_members rm JOIN messages m ON m.room_id = rm.room_id WHERE m.id = ? AND rm.agent_name != m.sender",
+        (message_id,)
+    )
+    expected = [r["agent_name"] for r in cursor.fetchall()]
+    conn.close()
+    acked_names = [a["agent_name"] for a in acks]
+    return {
+        "message_id": message_id,
+        "expected": expected,
+        "acked": acks,
+        "pending": [e for e in expected if e not in acked_names],
+        "all_acked": len([e for e in expected if e not in acked_names]) == 0
+    }
+
+
+def get_unacked_messages(agent_name: str, limit: int = 20) -> list:
+    """Get messages sent by an agent that haven't been fully acknowledged."""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT m.id, m.room_id, m.sender, m.content, m.timestamp,
+                  (SELECT COUNT(*) FROM room_members rm2 JOIN messages m2 ON m2.room_id = rm2.room_id
+                   WHERE m2.id = m.id AND rm2.agent_name != m.sender) as expected_count,
+                  (SELECT COUNT(*) FROM message_ack ma WHERE ma.message_id = m.id) as ack_count
+           FROM messages m
+           WHERE m.sender = ?
+           AND m.timestamp > datetime('now', '-1 hour')
+           AND m.is_deleted = FALSE
+           AND (SELECT COUNT(*) FROM message_ack ma WHERE ma.message_id = m.id) <
+               (SELECT COUNT(*) FROM room_members rm2 JOIN messages m2 ON m2.room_id = rm2.room_id
+                WHERE m2.id = m.id AND rm2.agent_name != m.sender)
+           ORDER BY m.timestamp DESC LIMIT ?""",
+        (agent_name, limit)
+    )
+    results = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return results
+
+
+def search_messages(query: str, room_id: str = None, sender: str = None, limit: int = 50) -> list:
+    """Full-text search across messages using FTS5."""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Build FTS query with optional filters
+    fts_conditions = []
+    params = []
+    
+    if room_id:
+        fts_conditions.append("room_id = ?")
+        params.append(room_id)
+    if sender:
+        fts_conditions.append("sender = ?")
+        params.append(sender)
+    
+    where_clause = " AND ".join(fts_conditions) if fts_conditions else "1=1"
+    params.append(query)
+    params.append(limit)
+    
+    # FTS5 search with bm25 ranking
+    cursor.execute(
+        f"""SELECT m.id, m.room_id, m.sender, m.content, m.structured, m.timestamp, m.thread_id,
+                   m.is_deleted, m.edited_at,
+                   rank
+            FROM messages_fts f
+            JOIN messages m ON m.rowid = f.rowid
+            WHERE messages_fts MATCH ? AND {where_clause} AND m.is_deleted = FALSE
+            ORDER BY rank
+            LIMIT ?""",
+        params
+    )
+    results = []
+    for row in cursor.fetchall():
+        msg = dict(row)
+        if msg.get("structured"):
+            msg["structured"] = json.loads(msg["structured"])
+        results.append(msg)
+    conn.close()
+    return results
 
 
 def get_unread_counts(agent_name: str) -> Dict[str, int]:
@@ -1061,6 +1280,11 @@ async def send_thread_message(thread_id: str, token: str, req: SendThreadMessage
     agent = get_agent_by_token(token)
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
+    
+    if not await rate_limiter.consume(agent["name"]):
+        status = await rate_limiter.get_status(agent["name"])
+        raise HTTPException(status_code=429, detail=f"Rate limited. {status['tokens_available']} tokens remaining, refilling at {status['refill_rate']}/sec")
+    
     thread = get_thread(thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
@@ -1150,6 +1374,10 @@ async def send_channel_message(room_id: str, token: str, req: SendMessageRequest
     agent = get_agent_by_token(token)
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
+    
+    if not await rate_limiter.consume(agent["name"]):
+        status = await rate_limiter.get_status(agent["name"])
+        raise HTTPException(status_code=429, detail=f"Rate limited. {status['tokens_available']} tokens remaining, refilling at {status['refill_rate']}/sec")
     
     mentions_spencer = "@Spencer" in req.content or req.content.lower().startswith("spencer")
     requires_human = req.structured.get("requires_human", False) if req.structured else False
@@ -1258,6 +1486,11 @@ async def send_dm_message(other_agent: str, token: str, req: SendMessageRequest)
     agent = get_agent_by_token(token)
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
+    
+    if not await rate_limiter.consume(agent["name"]):
+        status = await rate_limiter.get_status(agent["name"])
+        raise HTTPException(status_code=429, detail=f"Rate limited. {status['tokens_available']} tokens remaining, refilling at {status['refill_rate']}/sec")
+    
     try:
         room_id = create_dm(agent["name"], other_agent)
     except ValueError as e:
@@ -1306,6 +1539,26 @@ async def clear_my_notifications(token: str, ids: Optional[List[str]] = None):
 
 class MarkReadRequest(BaseModel):
     room_id: str
+
+
+class StatusUpdateRequest(BaseModel):
+    status_detail: Optional[str] = None  # idle, busy, error, typing, in_call, debugging, deploying
+    status_message: Optional[str] = None  # Free-form status message
+
+
+@app.post("/api/v2/presence/status")
+async def update_agent_status(token: str, req: StatusUpdateRequest):
+    """Update extended presence status (detail + custom message)."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    set_presence(agent["name"], 
+                 status=presence_mgr.get_status(agent["name"]),
+                 status_detail=req.status_detail,
+                 status_message=req.status_message)
+    # Broadcast status update
+    await presence_mgr.broadcast_presence(agent["name"], presence_mgr.get_status(agent["name"]))
+    return {"status": "ok", "agent": agent["name"], "status_detail": req.status_detail, "status_message": req.status_message}
 
 @app.post("/api/v2/read")
 async def mark_read(token: str, req: MarkReadRequest):
@@ -1357,6 +1610,55 @@ async def get_reconnect_info(token: str):
     delay = presence_mgr.get_reconnect_delay(agent["name"])
     attempts = presence_mgr.reconnect_attempts.get(agent["name"], 0)
     return {"agent": agent["name"], "reconnect_attempts": attempts, "backoff_seconds": delay}
+
+
+@app.get("/api/v2/messages/{msg_id}/ack")
+async def get_message_ack(msg_id: str, token: str):
+    """Get delivery acknowledgment status for a message."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    status = get_message_ack_status(msg_id)
+    return status
+
+
+@app.get("/api/v2/messages/unacked")
+async def get_my_unacked_messages(token: str, limit: int = 20):
+    """Get messages sent by this agent that haven't been fully acknowledged."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    unacked = get_unacked_messages(agent["name"], limit)
+    return {"unacked": unacked, "count": len(unacked)}
+
+
+@app.get("/api/v2/ratelimit")
+async def get_rate_limit_status(token: str):
+    """Get current rate limit status for the authenticated agent."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    status = await rate_limiter.get_status(agent["name"])
+    return {"agent": agent["name"], **status}
+
+
+class SearchRequest(BaseModel):
+    q: str
+    room_id: Optional[str] = None
+    sender: Optional[str] = None
+    limit: int = 50
+
+
+@app.post("/api/v2/search")
+async def search_messages_endpoint(token: str, req: SearchRequest):
+    """Full-text search across messages using FTS5."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    if not req.q or len(req.q.strip()) < 2:
+        raise HTTPException(status_code=400, detail="Search query must be at least 2 characters")
+    results = search_messages(req.q, room_id=req.room_id, sender=req.sender, limit=req.limit)
+    return {"query": req.q, "results": results, "count": len(results)}
 
 
 @app.get("/api/v2/admin/banner")
@@ -1423,6 +1725,10 @@ async def broadcast_to_room(room_id: str, message: dict):
         try:
             await websocket.send_json(message)
             print(f"[Broadcast] sent to {agent_name}")
+            # Auto-record ack for successfully delivered messages
+            msg_id = message.get("id")
+            if msg_id:
+                record_message_ack(msg_id, agent_name)
         except Exception as e:
             print(f"[Broadcast] failed to send to {agent_name}: {e}")
             disconnected.append((agent_name, websocket))
@@ -1503,7 +1809,51 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 elif action == "heartbeat":
                     await presence_mgr.record_heartbeat(agent_name)
                 
+                elif action == "ack":
+                    # Message delivery acknowledgment
+                    message_id = msg.get("message_id")
+                    if message_id:
+                        record_message_ack(message_id, agent_name)
+                        await websocket.send_json({
+                            "type": "system",
+                            "event": "ack_recorded",
+                            "message_id": message_id,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        # Check if all recipients have acked, notify the sender
+                        ack_status = get_message_ack_status(message_id)
+                        if ack_status["all_acked"]:
+                            # Find the original sender and notify them
+                            conn = sqlite3.connect(DATABASE)
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT sender FROM messages WHERE id = ?", (message_id,))
+                            row = cursor.fetchone()
+                            conn.close()
+                            if row:
+                                sender_name = row[0]
+                                notification = {
+                                    "type": "system",
+                                    "event": "message_delivered",
+                                    "message_id": message_id,
+                                    "all_recipients_acked": True,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
+                                for ws in presence_mgr.connections.get(sender_name, []):
+                                    try:
+                                        await ws.send_json(notification)
+                                    except Exception:
+                                        pass
+                
                 elif action == "send":
+                    if not await rate_limiter.consume(agent_name):
+                        await websocket.send_json({
+                            "type": "system",
+                            "event": "rate_limited",
+                            "detail": "Too many messages. Slow down.",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+                    
                     room_id = msg.get("room_id", "general")
                     content = msg.get("content", "")
                     structured = msg.get("structured")
@@ -1513,7 +1863,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     
                     msg_id = save_message(room_id, agent_name, content, structured,
                                           requires_human, mentions_spencer)
-                    
+
                     await broadcast_to_room(room_id, {
                         "type": "message",
                         "id": msg_id,
@@ -1525,7 +1875,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "mentions_spencer": mentions_spencer,
                         "timestamp": datetime.utcnow().isoformat()
                     })
-                
+                    # Confirm message was sent and broadcast
+                    await websocket.send_json({
+                        "type": "system",
+                        "event": "message_sent",
+                        "message_id": msg_id,
+                        "room_id": room_id,
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+
                 elif action == "presence":
                     status = msg.get("status", "online")
                     current_room = msg.get("current_room")
@@ -1545,6 +1903,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             })
                 
                 elif action == "send_thread":
+                    if not await rate_limiter.consume(agent_name):
+                        await websocket.send_json({
+                            "type": "system",
+                            "event": "rate_limited",
+                            "detail": "Too many messages. Slow down.",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+
                     thread_id = msg.get("thread_id")
                     content = msg.get("content", "")
                     structured = msg.get("structured")
@@ -1561,6 +1928,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "sender": agent_name, "content": content,
                             "structured": structured, "requires_human": requires_human,
                             "mentions_spencer": mentions_spencer,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        # Notify sender via ack that thread message was broadcast
+                        await websocket.send_json({
+                            "type": "system",
+                            "event": "message_sent",
+                            "message_id": msg_id,
+                            "thread_id": thread_id,
                             "timestamp": datetime.utcnow().isoformat()
                         })
                 
@@ -1635,10 +2010,15 @@ def _check_heartbeat_timeouts():
                     if conn_count > 0:
                         stale_agents.append(agent_name)
             for agent_name in stale_agents:
-                # Broadcast away status for stale agents
-                asyncio.get_event_loop().create_task(
-                    presence_mgr.broadcast_presence(agent_name, "away")
-                )
+                # Broadcast away status for stale agents using the main event loop
+                try:
+                    loop = asyncio.get_running_loop()
+                    asyncio.run_coroutine_threadsafe(
+                        presence_mgr.broadcast_presence(agent_name, "away"), loop
+                    )
+                except RuntimeError:
+                    # No running event loop yet - skip this cycle
+                    pass
         except Exception:
             pass
 

@@ -1,13 +1,18 @@
 [Unit]
-Description=Agent Chat Server v2
+Description=Agent Chat Server v2 (ACV2)
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/spencer/agents-chat-v2-build
-ExecStart=/home/spencer/agents-chat-v2-build/venv/bin/python /home/spencer/agents-chat-v2-build/main_v2.py
+User=spencer
+WorkingDirectory=/home/spencer/agents-chat-v2
+ExecStart=/home/spencer/agents-chat-v2/venv/bin/python main_v2.py
 Restart=always
 RestartSec=5
+StandardOutput=append:/home/spencer/agents-chat-v2/server.log
+StandardError=append:/home/spencer/agents-chat-v2/server.log
+# Environment
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
