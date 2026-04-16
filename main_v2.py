@@ -5,13 +5,17 @@ Parallel deployment with v1 (port 8081).
 """
 import base64
 import json
+import logging
 import os
+import signal
 import sqlite3
 import threading
 import time
 import uuid
 import asyncio
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -20,8 +24,23 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-# Configuration
-DATABASE = "chat_v2.db"
+# Configuration — absolute DB path anchored to script directory
+BASE_DIR = Path(__file__).resolve().parent
+DATABASE = str(BASE_DIR / "chat_v2.db")
+
+# Structured logging setup
+logger = logging.getLogger("acv2")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z"
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+# Graceful shutdown flag
+_shutdown_event = threading.Event()
 AGENT_TOKENS = {}
 MAX_HISTORY_PER_CHANNEL = 50
 PRESENCE_AWAY_MINUTES = 10
@@ -30,6 +49,33 @@ HEARTBEAT_TIMEOUT_SECONDS = 45  # No heartbeat = mark away
 HEARTBEAT_INTERVAL_SECONDS = 30  # Agents should heartbeat every 30s
 
 # In-memory presence and websocket tracking
+
+@contextmanager
+def get_db(row_factory: bool = True):
+    """Context manager for SQLite connections. Ensures connections are always closed.
+
+    Usage:
+        with get_db() as conn:
+            conn.execute("SELECT ...")
+        # conn automatically closed
+
+        with get_db(row_factory=False) as conn:
+            conn.execute("SELECT ...")
+        # Without row_factory, cursor returns tuples instead of dict-like Rows
+    """
+    conn = sqlite3.connect(DATABASE)
+    try:
+        if row_factory:
+            conn.row_factory = sqlite3.Row
+        yield conn
+
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 class RateLimiter:
     """Simple token-bucket rate limiter per agent."""
     def __init__(self, max_tokens: int = 10, refill_rate: float = 1.0):
@@ -260,9 +306,8 @@ metrics = APIMetrics()
 
 
 def init_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS rooms (
@@ -495,10 +540,6 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_pinned_room ON pinned_messages(room_id)
     ''')
 
-    conn.commit()
-    conn.close()
-
-
 def load_agents():
     global AGENT_TOKENS
     try:
@@ -513,78 +554,70 @@ def get_agent_by_token(token: str) -> Optional[dict]:
 
 
 def set_presence(agent_name: str, status: str, current_room: str = None, status_detail: str = None, status_message: str = None):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    # Build dynamic update for optional fields
-    updates = ["status=excluded.status", "last_seen=excluded.last_seen", "current_room=excluded.current_room"]
-    values = [agent_name, status, datetime.now(timezone.utc).isoformat(), current_room]
-    
-    if status_detail is not None:
-        updates.append("status_detail=excluded.status_detail")
-        values.append(status_detail)
-    
-    if status_message is not None:
-        updates.append("status_message=excluded.status_message")
-        values.append(status_message)
-    
-    placeholders = ", ".join(["?"] * len(values))
-    cols = "agent_name, status, last_seen, current_room"
-    if status_detail is not None:
-        cols += ", status_detail"
-    if status_message is not None:
-        cols += ", status_message"
-    
-    cursor.execute(
-        f"""INSERT INTO presence ({cols})
-           VALUES ({placeholders})
-           ON CONFLICT(agent_name) DO UPDATE SET
-           {", ".join(updates)}""",
-        values
-    )
-    conn.commit()
-    conn.close()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
+        # Build dynamic update for optional fields
+        updates = ["status=excluded.status", "last_seen=excluded.last_seen", "current_room=excluded.current_room"]
+        values = [agent_name, status, datetime.now(timezone.utc).isoformat(), current_room]
+        
+        if status_detail is not None:
+            updates.append("status_detail=excluded.status_detail")
+            values.append(status_detail)
+        
+        if status_message is not None:
+            updates.append("status_message=excluded.status_message")
+            values.append(status_message)
+        
+        placeholders = ", ".join(["?"] * len(values))
+        cols = "agent_name, status, last_seen, current_room"
+        if status_detail is not None:
+            cols += ", status_detail"
+        if status_message is not None:
+            cols += ", status_message"
+        
+        cursor.execute(
+            f"""INSERT INTO presence ({cols})
+               VALUES ({placeholders})
+               ON CONFLICT(agent_name) DO UPDATE SET
+               {", ".join(updates)}""",
+            values
+        )
 
 
 def get_presence_last_seen(agent_name: str) -> Optional[datetime]:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT last_seen FROM presence WHERE agent_name = ?", (agent_name,))
-    row = cursor.fetchone()
-    conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_seen FROM presence WHERE agent_name = ?", (agent_name,))
+        row = cursor.fetchone()
     if row:
         return datetime.fromisoformat(row["last_seen"])
     return None
 
 
 def get_all_presence() -> List[dict]:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT agent_name, status, last_seen, current_room, status_detail, status_message FROM presence")
-    rows = cursor.fetchall()
-    conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT agent_name, status, last_seen, current_room, status_detail, status_message FROM presence")
+        rows = cursor.fetchall()
     return [dict(r) for r in rows]
 
 
 def mark_room_read(agent_name: str, room_id: str):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    cursor.execute(
-        """INSERT INTO room_read_receipts (agent_name, room_id, last_read_at)
-           VALUES (?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(agent_name, room_id) DO UPDATE SET
-           last_read_at = excluded.last_read_at""",
-        (agent_name, room_id)
-    )
-    conn.commit()
-    conn.close()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO room_read_receipts (agent_name, room_id, last_read_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(agent_name, room_id) DO UPDATE SET
+               last_read_at = excluded.last_read_at""",
+            (agent_name, room_id)
+        )
 
 
 def record_message_ack(message_id: str, agent_name: str):
     """Record that an agent has acknowledged receiving a message."""
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO message_ack (message_id, agent_name, acked_at)
            VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -592,15 +625,11 @@ def record_message_ack(message_id: str, agent_name: str):
            acked_at = excluded.acked_at""",
         (message_id, agent_name)
     )
-    conn.commit()
-    conn.close()
-
 
 def get_message_ack_status(message_id: str) -> dict:
     """Get acknowledgment status for a message: who has acked it."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "SELECT agent_name, acked_at FROM message_ack WHERE message_id = ? ORDER BY acked_at",
         (message_id,)
@@ -611,7 +640,7 @@ def get_message_ack_status(message_id: str) -> dict:
         (message_id,)
     )
     expected = [r["agent_name"] for r in cursor.fetchall()]
-    conn.close()
+
     acked_names = [a["agent_name"] for a in acks]
     return {
         "message_id": message_id,
@@ -624,9 +653,8 @@ def get_message_ack_status(message_id: str) -> dict:
 
 def get_unacked_messages(agent_name: str, limit: int = 20) -> list:
     """Get messages sent by an agent that haven't been fully acknowledged."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """SELECT m.id, m.room_id, m.sender, m.content, m.timestamp,
                   (SELECT COUNT(*) FROM room_members rm2 JOIN messages m2 ON m2.room_id = rm2.room_id
@@ -643,7 +671,7 @@ def get_unacked_messages(agent_name: str, limit: int = 20) -> list:
         (agent_name, limit)
     )
     results = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+
     return results
 
 
@@ -654,70 +682,68 @@ def add_reaction(message_id: str, agent_name: str, emoji: str) -> dict:
     """Add a reaction to a message. Returns reaction state."""
     if emoji not in ALLOWED_EMOJIS:
         return {"error": f"Emoji not in allowed set: {emoji}"}
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     # Check message exists
     cursor.execute("SELECT room_id FROM messages WHERE id = ?", (message_id,))
     row = cursor.fetchone()
     if not row:
-        conn.close()
+
         return {"error": "Message not found"}
     room_id = row[0]
     cursor.execute(
         "INSERT INTO message_reactions (message_id, agent_name, emoji) VALUES (?, ?, ?)\n           ON CONFLICT(message_id, agent_name, emoji) DO NOTHING",
         (message_id, agent_name, emoji)
     )
-    conn.commit()
+
     # Get updated reactions for this message
     cursor.execute(
         "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
         (message_id,)
     )
     reactions = [{"emoji": r[0], "count": r[1], "agents": r[2].split(",")} for r in cursor.fetchall()]
-    conn.close()
+
     return {"message_id": message_id, "room_id": room_id, "reactions": reactions}
 
 def remove_reaction(message_id: str, agent_name: str, emoji: str) -> dict:
     """Remove a reaction from a message."""
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT room_id FROM messages WHERE id = ?", (message_id,))
     row = cursor.fetchone()
     if not row:
-        conn.close()
+
         return {"error": "Message not found"}
     room_id = row[0]
     cursor.execute(
         "DELETE FROM message_reactions WHERE message_id = ? AND agent_name = ? AND emoji = ?",
         (message_id, agent_name, emoji)
     )
-    conn.commit()
+
     cursor.execute(
         "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
         (message_id,)
     )
     reactions = [{"emoji": r[0], "count": r[1], "agents": r[2].split(",")} for r in cursor.fetchall()]
-    conn.close()
+
     return {"message_id": message_id, "room_id": room_id, "reactions": reactions}
 
 def get_message_reactions(message_id: str) -> list:
     """Get all reactions for a message."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
         (message_id,)
     )
     reactions = [{"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")} for r in cursor.fetchall()]
-    conn.close()
+
     return reactions
 
 def get_room_reactions(room_id: str, limit: int = 50) -> dict:
     """Get reactions for recent messages in a room. Returns {message_id: [reactions]}."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "SELECT id FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT ?",
         (room_id, limit)
@@ -732,18 +758,18 @@ def get_room_reactions(room_id: str, limit: int = 50) -> dict:
         reactions = [{"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")} for r in cursor.fetchall()]
         if reactions:
             result[mid] = reactions
-    conn.close()
+
     return result
 
 # --- Message Pinning (UX-004) ---
 def pin_message(message_id: str, room_id: str, pinned_by: str) -> dict:
     """Pin a message to the top of a room."""
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT content FROM messages WHERE id = ? AND room_id = ?", (message_id, room_id))
     row = cursor.fetchone()
     if not row:
-        conn.close()
+
         return {"error": "Message not found in this room"}
     content_preview = row[0][:200] if row[0] else ""
     pin_id = str(uuid.uuid4())
@@ -751,39 +777,36 @@ def pin_message(message_id: str, room_id: str, pinned_by: str) -> dict:
         "INSERT OR REPLACE INTO pinned_messages (id, room_id, message_id, pinned_by, content_preview) VALUES (?, ?, ?, ?, ?)",
         (pin_id, room_id, message_id, pinned_by, content_preview)
     )
-    conn.commit()
-    conn.close()
+
     return {"id": pin_id, "room_id": room_id, "message_id": message_id, "pinned_by": pinned_by, "content_preview": content_preview}
 
 def unpin_message(room_id: str, message_id: str) -> bool:
     """Unpin a message from a room."""
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("DELETE FROM pinned_messages WHERE room_id = ? AND message_id = ?", (room_id, message_id))
-    conn.commit()
+
     deleted = cursor.rowcount > 0
-    conn.close()
+
     return deleted
 
 def get_pinned_messages(room_id: str) -> list:
     """Get all pinned messages for a room."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "SELECT id, message_id, pinned_by, content_preview, pinned_at FROM pinned_messages WHERE room_id = ? ORDER BY pinned_at DESC",
         (room_id,)
     )
     pins = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+
     return pins
 
 
 def search_messages(query: str, room_id: str = None, sender: str = None, limit: int = 50) -> list:
     """Full-text search across messages using FTS5."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     
     # Build FTS query with optional filters
     fts_conditions = []
@@ -818,13 +841,13 @@ def search_messages(query: str, room_id: str = None, sender: str = None, limit: 
         if msg.get("structured"):
             msg["structured"] = json.loads(msg["structured"])
         results.append(msg)
-    conn.close()
+
     return results
 
 
 def get_unread_counts(agent_name: str) -> Dict[str, int]:
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """SELECT rm.room_id, COUNT(m.id) as cnt
            FROM room_members rm
@@ -836,29 +859,26 @@ def get_unread_counts(agent_name: str) -> Dict[str, int]:
         (agent_name, agent_name, agent_name)
     )
     rows = cursor.fetchall()
-    conn.close()
+
     return {r[0]: r[1] for r in rows if r[1] > 0}
 
 
 def get_banner() -> str:
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", ("banner_text",))
     row = cursor.fetchone()
-    conn.close()
+
     return row[0] if row else ""
 
 
 def set_banner(text: str):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
         ("banner_text", text)
     )
-    conn.commit()
-    conn.close()
-
 
 def create_dm(agent_a: str, agent_b: str) -> str:
     if agent_a == agent_b:
@@ -866,8 +886,8 @@ def create_dm(agent_a: str, agent_b: str) -> str:
     agents_sorted = sorted([agent_a, agent_b])
     room_id = f"dm_{agents_sorted[0]}_{agents_sorted[1]}"
     
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "INSERT OR IGNORE INTO rooms (id, type, name, created_by, metadata) VALUES (?, 'dm', ?, 'system', ?)",
         (room_id, f"DM: {agent_a} & {agent_b}", json.dumps({"participants": [agent_a, agent_b]}))
@@ -876,18 +896,16 @@ def create_dm(agent_a: str, agent_b: str) -> str:
         "INSERT OR IGNORE INTO room_members (room_id, agent_name) VALUES (?, ?), (?, ?)",
         (room_id, agent_a, room_id, agent_b)
     )
-    conn.commit()
-    conn.close()
+
     return room_id
 
 
 def get_or_create_room(room_id: str, room_type: str = "channel") -> dict:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT * FROM rooms WHERE id = ?", (room_id,))
     row = cursor.fetchone()
-    conn.close()
+
     if row:
         return dict(row)
     return None
@@ -897,29 +915,27 @@ def get_or_create_room(room_id: str, room_type: str = "channel") -> dict:
 
 def create_thread(channel_id: str, creator: str, topic: str) -> dict:
     thread_id = f"thread_{channel_id}_{uuid.uuid4().hex[:8]}"
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT id FROM rooms WHERE id = ? AND type = 'channel'", (channel_id,))
     if not cursor.fetchone():
-        conn.close()
+
         raise ValueError(f"Channel '{channel_id}' not found")
     cursor.execute(
         "INSERT INTO threads (id, parent_channel_id, creator, topic) VALUES (?, ?, ?, ?)",
         (thread_id, channel_id, creator, topic)
     )
     cursor.execute("INSERT INTO thread_members (thread_id, agent_name) VALUES (?, ?)", (thread_id, creator))
-    conn.commit()
+
     cursor.execute("SELECT * FROM threads WHERE id = ?", (thread_id,))
     thread = dict(cursor.fetchone())
-    conn.close()
+
     return thread
 
 
 def list_threads(channel_id: str, include_archived: bool = False) -> list:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     af = "" if include_archived else "AND t.is_archived = FALSE"
     cursor.execute(
         "SELECT t.*, "
@@ -931,63 +947,58 @@ def list_threads(channel_id: str, include_archived: bool = False) -> list:
         (channel_id,)
     )
     threads = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+
     return threads
 
 
 def get_thread(thread_id: str) -> dict | None:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT * FROM threads WHERE id = ?", (thread_id,))
     thread = cursor.fetchone()
     if not thread:
-        conn.close()
+
         return None
     thread = dict(thread)
     cursor.execute("SELECT agent_name, joined_at FROM thread_members WHERE thread_id = ? ORDER BY joined_at", (thread_id,))
     thread["members"] = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+
     return thread
 
 
 def join_thread(thread_id: str, agent_name: str) -> bool:
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO thread_members (thread_id, agent_name) VALUES (?, ?)", (thread_id, agent_name))
-        conn.commit()
-        conn.close()
+
         return True
     except Exception:
-        conn.close()
+
         return False
 
 
 def archive_thread(thread_id: str) -> bool:
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("UPDATE threads SET is_archived = TRUE WHERE id = ?", (thread_id,))
     updated = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
+
     return updated
 
 
 def update_thread_topic(thread_id: str, topic: str) -> bool:
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("UPDATE threads SET topic = ? WHERE id = ?", (topic, thread_id))
     updated = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
+
     return updated
 
 
 def get_thread_messages(thread_id: str, limit: int = 50, before_id: str = None) -> list:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     if before_id:
         cursor.execute(
             "SELECT * FROM messages WHERE thread_id = ? AND timestamp < "
@@ -1000,7 +1011,7 @@ def get_thread_messages(thread_id: str, limit: int = 50, before_id: str = None) 
             (thread_id, limit)
         )
     rows = cursor.fetchall()
-    conn.close()
+
     messages = []
     for row in reversed(rows):
         msg = dict(row)
@@ -1015,8 +1026,8 @@ def save_thread_message(thread_id: str, room_id: str, sender: str, content: str,
                         mentions_spencer: bool = False,
                         image_url: str = None, image_type: str = None) -> str:
     msg_id = str(uuid.uuid4())
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO messages (id, room_id, thread_id, sender, content, structured, requires_human, mentions_spencer, is_deleted, image_url, image_type) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?)",
@@ -1024,7 +1035,7 @@ def save_thread_message(thread_id: str, room_id: str, sender: str, content: str,
          json.dumps(structured) if structured else None,
          requires_human, mentions_spencer, image_url, image_type)
     )
-    conn.commit()
+
     # Create notifications for message
     create_notifications_for_message(msg_id, room_id, sender, content, mentions_spencer)
     metrics.record_message()
@@ -1035,8 +1046,8 @@ def save_message(room_id: str, sender: str, content: str, structured: dict = Non
                  requires_human: bool = False, mentions_spencer: bool = False,
                  image_url: str = None, image_type: str = None) -> str:
     msg_id = str(uuid.uuid4())
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO messages (id, room_id, sender, content, structured, requires_human, mentions_spencer, is_deleted, image_url, image_type)
            VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?)""",
@@ -1044,9 +1055,7 @@ def save_message(room_id: str, sender: str, content: str, structured: dict = Non
          json.dumps(structured) if structured else None,
          requires_human, mentions_spencer, image_url, image_type)
     )
-    conn.commit()
-    conn.close()
-    
+
     # Create notifications for message
     create_notifications_for_message(msg_id, room_id, sender, content, mentions_spencer)
     metrics.record_message()
@@ -1054,15 +1063,14 @@ def save_message(room_id: str, sender: str, content: str, structured: dict = Non
 
 
 def create_notifications_for_message(message_id: str, room_id: str, sender: str, content: str, mentions_spencer: bool):
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     
     # Get room info
     cursor.execute("SELECT type, name FROM rooms WHERE id = ?", (room_id,))
     room = cursor.fetchone()
     if not room:
-        conn.close()
+
         return
     
     room_type = room["type"]
@@ -1107,9 +1115,6 @@ def create_notifications_for_message(message_id: str, room_id: str, sender: str,
                        VALUES (?, ?, 'mention', ?, ?, ?, ?)""",
                     (notif_id, mentioned, sender, room_id, message_id, content[:200])
                 )
-    
-    conn.commit()
-    conn.close()
 
 async def notify_mentions_ws(room_id: str, sender: str, content: str, message_id: str):
     """Send real-time WebSocket notifications to mentioned agents."""
@@ -1129,12 +1134,12 @@ async def notify_mentions_ws(room_id: str, sender: str, content: str, message_id
             except Exception:
                 pass
     # Channel mentions
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT type FROM rooms WHERE id = ?", (room_id,))
     row = cursor.fetchone()
     room_type = row[0] if row else None
-    conn.close()
+
     if room_type == "channel":
         import re
         mentions = re.findall(r'@(\w+)', content)
@@ -1156,11 +1161,9 @@ async def notify_mentions_ws(room_id: str, sender: str, content: str, message_id
                     pass
 
 
-
 def get_room_messages(room_id: str, limit: int = 50, before_id: str = None) -> List[dict]:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
 
     if before_id:
         cursor.execute(
@@ -1202,14 +1205,12 @@ def get_room_messages(room_id: str, limit: int = 50, before_id: str = None) -> L
         for msg in messages:
             msg["reactions"] = reactions_by_msg.get(msg["id"], [])
 
-    conn.close()
     return messages
 
 
 def get_notifications(agent_name: str, cleared: bool = False) -> List[dict]:
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """SELECT * FROM notifications 
            WHERE agent_name = ? AND cleared = ?
@@ -1217,13 +1218,13 @@ def get_notifications(agent_name: str, cleared: bool = False) -> List[dict]:
         (agent_name, cleared)
     )
     rows = cursor.fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 
 def clear_notifications(agent_name: str, notification_ids: List[str] = None):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     if notification_ids:
         placeholders = ",".join("?" * len(notification_ids))
         cursor.execute(
@@ -1235,27 +1236,20 @@ def clear_notifications(agent_name: str, notification_ids: List[str] = None):
             "UPDATE notifications SET cleared = TRUE WHERE agent_name = ?",
             (agent_name,)
         )
-    conn.commit()
-    conn.close()
-
 
 def ensure_agent_in_default_channels(agent_name: str):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     for room_id in ["general", "agenttracker", "ops"]:
         cursor.execute(
             "INSERT OR IGNORE INTO room_members (room_id, agent_name) VALUES (?, ?)",
             (room_id, agent_name)
         )
-    conn.commit()
-    conn.close()
-
 
 def get_agent_rooms(agent_name: str) -> List[dict]:
     ensure_agent_in_default_channels(agent_name)
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """SELECT r.* FROM rooms r
            JOIN room_members rm ON r.id = rm.room_id
@@ -1264,7 +1258,7 @@ def get_agent_rooms(agent_name: str) -> List[dict]:
         (agent_name,)
     )
     rows = cursor.fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 
@@ -1318,20 +1312,70 @@ class ThreadUpdateRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Application lifecycle: init DB, load config, handle graceful shutdown."""
     init_db()
     load_agents()
-    yield
+    logger.info("ACV2 server started")
+    try:
+        yield
+    finally:
+        logger.info("ACV2 server shutting down, closing WebSocket connections...")
+        _shutdown_event.set()
+        # Close all active WebSocket connections gracefully
+        async with presence_mgr.lock:
+            for agent_name, ws_list in list(presence_mgr.connections.items()):
+                for ws in ws_list:
+                    try:
+                        await ws.close(code=1001, reason="Server shutting down")
+                    except Exception:
+                        pass
+                ws_list.clear()
+            presence_mgr.connections.clear()
+        logger.info("ACV2 server shutdown complete")
 
 
 app = FastAPI(title="Agent Chat v2", lifespan=lifespan)
 
 
-# Middleware: count all API requests
+# Middleware: request counting, correlation IDs, and rate limit headers
 @app.middleware("http")
 async def count_requests(request: Request, call_next):
     metrics.record_request()
+    
+    # Generate or propagate correlation ID for request tracing
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
+    
+    # Check rate limit before processing
+    agent_header = request.headers.get("X-Agent-Token")
+    if agent_header:
+        agent = get_agent_by_token(agent_header)
+        if agent:
+            allowed = await rate_limiter.consume(agent["name"])
+            if not allowed:
+                metrics.record_error()
+                from fastapi.responses import JSONResponse
+                response = JSONResponse(
+                    status_code=429,
+                    content={"detail": "Rate limit exceeded. Try again later."}
+                )
+                response.headers["X-Request-ID"] = request_id
+                response.headers["X-RateLimit-Limit"] = "10"
+                response.headers["X-RateLimit-Remaining"] = "0"
+                return response
+    
     try:
         response = await call_next(request)
+        # Add correlation ID to response
+        response.headers["X-Request-ID"] = request_id
+        
+        # Add rate limit status if agent token present
+        if agent_header:
+            agent = get_agent_by_token(agent_header)
+            if agent:
+                status = await rate_limiter.get_status(agent["name"])
+                response.headers["X-RateLimit-Limit"] = str(int(status.get("max_tokens", 10)))
+                response.headers["X-RateLimit-Remaining"] = str(int(status.get("tokens_available", 0)))
+        
         return response
     except Exception:
         metrics.record_error()
@@ -1347,7 +1391,23 @@ async def v2_ui():
 
 @app.get("/api/v2/health")
 async def health_check():
-    return {"status": "ok", "version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat()}
+    # Quick DB health check
+    db_ok = False
+    try:
+        with get_db(row_factory=False) as conn:
+            conn.execute("SELECT 1")
+            db_ok = True
+    except Exception:
+        pass
+    
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "version": "2.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database": "connected" if db_ok else "error",
+        "agents_loaded": len(AGENT_TOKENS),
+        "active_connections": sum(len(ws) for ws in presence_mgr.connections.values()),
+    }
 
 
 @app.get("/api/v2/me")
@@ -1544,38 +1604,36 @@ async def unpin_endpoint(room_id: str, message_id: str, token: str):
 
 
 def edit_message(msg_id: str, content: str) -> bool:
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "UPDATE messages SET content = ?, edited_at = CURRENT_TIMESTAMP WHERE id = ? AND is_deleted = FALSE",
         (content, msg_id)
     )
     updated = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
+
     return updated
 
 
 def delete_message(msg_id: str) -> bool:
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "UPDATE messages SET content = '', is_deleted = TRUE, edited_at = CURRENT_TIMESTAMP WHERE id = ?",
         (msg_id,)
     )
     updated = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
+
     return updated
 
 
 def get_message_sender(msg_id: str) -> str | None:
     """Get the sender of a message, or None if not found."""
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("SELECT sender FROM messages WHERE id = ?", (msg_id,))
     row = cursor.fetchone()
-    conn.close()
+
     return row[0] if row else None
 
 @app.get("/api/v2/channels")
@@ -1595,8 +1653,8 @@ async def create_channel(token: str, req: CreateChannelRequest):
     if agent["name"] not in ("Data", "Spencer"):
         raise HTTPException(status_code=403, detail="Only Data or Spencer can create channels")
     
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO rooms (id, type, name, created_by, metadata) VALUES (?, 'channel', ?, ?, ?)",
         (req.id, req.name, agent["name"], json.dumps(req.metadata or {}))
@@ -1605,8 +1663,7 @@ async def create_channel(token: str, req: CreateChannelRequest):
         "INSERT INTO room_members (room_id, agent_name) VALUES (?, ?)",
         (req.id, agent["name"])
     )
-    conn.commit()
-    conn.close()
+
     return {"status": "created", "id": req.id}
 
 
@@ -1919,11 +1976,10 @@ async def leave_dm(other_agent: str, token: str):
         raise HTTPException(status_code=403, detail="Invalid token")
     agents_sorted = sorted([agent["name"], other_agent])
     room_id = f"dm_{agents_sorted[0]}_{agents_sorted[1]}"
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("DELETE FROM room_members WHERE room_id = ? AND agent_name = ?", (room_id, agent["name"]))
-    conn.commit()
-    conn.close()
+
     return {"status": "left"}
 
 
@@ -2197,8 +2253,8 @@ async def register_webhook(token: str, req: WebhookRegisterRequest):
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
     
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """INSERT INTO webhooks (agent_name, url, events)
            VALUES (?, ?, ?)
@@ -2206,8 +2262,7 @@ async def register_webhook(token: str, req: WebhookRegisterRequest):
            url=excluded.url, events=excluded.events""",
         (agent["name"], req.url, json.dumps(req.events))
     )
-    conn.commit()
-    conn.close()
+
     return {"status": "registered"}
 
 
@@ -2217,11 +2272,10 @@ async def unregister_webhook(token: str):
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
     
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
     cursor.execute("DELETE FROM webhooks WHERE agent_name = ?", (agent["name"],))
-    conn.commit()
-    conn.close()
+
     return {"status": "unregistered"}
 
 
@@ -2229,19 +2283,19 @@ async def unregister_webhook(token: str):
 
 async def broadcast_to_room(room_id: str, message: dict):
     subscribers = await presence_mgr.get_subscribers(room_id)
-    print(f"[Broadcast] room={room_id} subscribers={len(subscribers)}")
+    logger.info(f"Broadcast room={room_id} subscribers={len(subscribers)}")
     disconnected = []
     start = time.monotonic()
     for agent_name, websocket in subscribers:
         try:
             await websocket.send_json(message)
-            print(f"[Broadcast] sent to {agent_name}")
+            logger.debug(f"Broadcast sent to {agent_name}")
             # Auto-record ack for successfully delivered messages
             msg_id = message.get("id")
             if msg_id:
                 record_message_ack(msg_id, agent_name)
         except Exception as e:
-            print(f"[Broadcast] failed to send to {agent_name}: {e}")
+            logger.warning(f"Broadcast failed for {agent_name}: {e}")
             disconnected.append((agent_name, websocket))
     latency_ms = (time.monotonic() - start) * 1000
     metrics.record_broadcast(len(subscribers), latency_ms)
@@ -2271,16 +2325,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     
     try:
         # Auto-join agent to default channels
-        conn = sqlite3.connect(DATABASE)
-        cursor = conn.cursor()
+        with get_db(row_factory=False) as conn:
+            cursor = conn.cursor()
         for room_id in ["general", "agenttracker", "ops"]:
             cursor.execute(
                 "INSERT OR IGNORE INTO room_members (room_id, agent_name) VALUES (?, ?)",
                 (room_id, agent_name)
             )
-        conn.commit()
-        conn.close()
-        
+
         # Send welcome with agent's rooms and current banner
         rooms = get_agent_rooms(agent_name)
         room_ids = [r["id"] for r in rooms]
@@ -2299,7 +2351,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # Auto-subscribe to all rooms so clients never miss messages
         await presence_mgr.subscribe(agent_name, websocket, room_ids)
-        print(f"[WS] Auto-subscribed {agent_name} to {room_ids}")
+        logger.info(f"WS auto-subscribe {agent_name} to {room_ids}")
         
         while True:
             data = await websocket.receive_text()
@@ -2310,7 +2362,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if action == "subscribe":
                     rooms = msg.get("rooms", [])
                     await presence_mgr.subscribe(agent_name, websocket, rooms)
-                    print(f"[WS] {agent_name} subscribed to {rooms}")
+                    logger.info(f"WS subscribe {agent_name} to {rooms}")
                     await websocket.send_json({
                         "type": "system",
                         "event": "subscribed",
@@ -2353,11 +2405,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         ack_status = get_message_ack_status(message_id)
                         if ack_status["all_acked"]:
                             # Find the original sender and notify them
-                            conn = sqlite3.connect(DATABASE)
-                            cursor = conn.cursor()
+                            with get_db(row_factory=False) as conn:
+                                cursor = conn.cursor()
                             cursor.execute("SELECT sender FROM messages WHERE id = ?", (message_id,))
                             row = cursor.fetchone()
-                            conn.close()
+
                             if row:
                                 sender_name = row[0]
                                 notification = {
@@ -2483,7 +2535,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         if thread:
                             join_thread(thread_id, agent_name)
                             await presence_mgr.subscribe(agent_name, websocket, [thread["parent_channel_id"]])
-                            print(f"[WS] {agent_name} subscribed to thread {thread_id}")
+                            logger.info(f"WS subscribe {agent_name} to thread {thread_id}")
                             await websocket.send_json({
                                 "type": "system", "event": "thread_subscribed",
                                 "thread_id": thread_id, "rooms": [thread["parent_channel_id"]]
@@ -2538,7 +2590,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         await presence_mgr.disconnect(agent_name, websocket)
         metrics.record_ws_disconnect()
     except Exception as e:
-        print(f"WebSocket error for {agent_name}: {e}")
+        logger.error(f"WebSocket error for {agent_name}: {e}")
         await presence_mgr.disconnect(agent_name, websocket)
         metrics.record_ws_disconnect()
 
@@ -2551,9 +2603,8 @@ async def get_relay_queue(token: str):
     if not agent or agent["name"] != "Data":
         raise HTTPException(status_code=403, detail="Invalid token")
     
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor()
     cursor.execute(
         """SELECT m.* FROM messages m
            WHERE (m.mentions_spencer = TRUE OR m.requires_human = TRUE)
@@ -2561,7 +2612,7 @@ async def get_relay_queue(token: str):
            ORDER BY m.timestamp DESC LIMIT 50"""
     )
     rows = cursor.fetchall()
-    conn.close()
+
     return {"pending": [dict(r) for r in rows]}
 
 
@@ -2631,8 +2682,8 @@ def _archive_old_messages():
     while True:
         time.sleep(MESSAGE_ARCHIVE_INTERVAL)
         try:
-            conn = sqlite3.connect(DATABASE)
-            cursor = conn.cursor()
+            with get_db(row_factory=False) as conn:
+                cursor = conn.cursor()
             cursor.execute(
                 """UPDATE messages SET is_deleted = TRUE, content = '[archived]'
                    WHERE is_deleted = FALSE
@@ -2641,12 +2692,11 @@ def _archive_old_messages():
                 (f"-{MESSAGE_ARCHIVE_DAYS} days",)
             )
             archived = cursor.rowcount
-            conn.commit()
-            conn.close()
+
             if archived > 0:
-                print(f"[Archive] Soft-deleted {archived} messages older than {MESSAGE_ARCHIVE_DAYS} days")
+                logger.info(f"Archive: soft-deleted {archived} messages older than {MESSAGE_ARCHIVE_DAYS} days")
         except Exception as e:
-            print(f"[Archive] Error: {e}")
+            logger.error(f"Archive daemon error: {e}")
 
 
 archive_thread = threading.Thread(target=_archive_old_messages, daemon=True)
