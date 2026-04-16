@@ -1479,6 +1479,16 @@ def delete_message(msg_id: str) -> bool:
     conn.close()
     return updated
 
+
+def get_message_sender(msg_id: str) -> str | None:
+    """Get the sender of a message, or None if not found."""
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sender FROM messages WHERE id = ?", (msg_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
 @app.get("/api/v2/channels")
 async def list_channels(token: str):
     agent = get_agent_by_token(token)
@@ -1525,6 +1535,10 @@ async def edit_channel_message(room_id: str, msg_id: str, token: str, req: SendM
     agent = get_agent_by_token(token)
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
+    # Verify message ownership (only sender or admins can edit)
+    sender = get_message_sender(msg_id)
+    if sender and sender != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only the message author or an admin can edit")
     if edit_message(msg_id, req.content):
         mentions_spencer = "@Spencer" in req.content
         create_notifications_for_message(msg_id, room_id, agent["name"], req.content, mentions_spencer)
@@ -1543,6 +1557,10 @@ async def delete_channel_message(room_id: str, msg_id: str, token: str):
     agent = get_agent_by_token(token)
     if not agent:
         raise HTTPException(status_code=403, detail="Invalid token")
+    # Verify message ownership
+    sender = get_message_sender(msg_id)
+    if sender and sender != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only the message author or an admin can delete")
     if delete_message(msg_id):
         await broadcast_to_room(room_id, {
             "type": "message", "delete": True, "id": msg_id,
@@ -1706,6 +1724,10 @@ async def edit_thread_message(thread_id: str, msg_id: str, token: str, req: Send
     thread = get_thread(thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
+    # Verify message ownership
+    sender = get_message_sender(msg_id)
+    if sender and sender != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only the message author or an admin can edit")
     if edit_message(msg_id, req.content):
         mentions_spencer = "@Spencer" in req.content
         create_notifications_for_message(msg_id, thread["parent_channel_id"], agent["name"], req.content, mentions_spencer)
@@ -1728,6 +1750,10 @@ async def delete_thread_message(thread_id: str, msg_id: str, token: str):
     thread = get_thread(thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
+    # Verify message ownership
+    sender = get_message_sender(msg_id)
+    if sender and sender != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only the message author or an admin can delete")
     if delete_message(msg_id):
         await broadcast_to_room(thread["parent_channel_id"], {
             "type": "message", "delete": True, "id": msg_id,
@@ -1821,6 +1847,10 @@ async def edit_dm_message(other_agent: str, msg_id: str, token: str, req: SendMe
         room_id = create_dm(agent["name"], other_agent)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Verify message ownership
+    sender = get_message_sender(msg_id)
+    if sender and sender != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only the message author or an admin can edit")
     if edit_message(msg_id, req.content):
         mentions_spencer = "@Spencer" in req.content
         create_notifications_for_message(msg_id, room_id, agent["name"], req.content, mentions_spencer)
@@ -1843,6 +1873,10 @@ async def delete_dm_message(other_agent: str, msg_id: str, token: str):
         room_id = create_dm(agent["name"], other_agent)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Verify message ownership
+    sender = get_message_sender(msg_id)
+    if sender and sender != agent["name"] and agent["name"] not in ("Data", "Spencer"):
+        raise HTTPException(status_code=403, detail="Only the message author or an admin can delete")
     if delete_message(msg_id):
         await broadcast_to_room(room_id, {
             "type": "message", "delete": True, "id": msg_id,
@@ -2180,18 +2214,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 elif action == "typing":
                     await presence_mgr.set_typing(agent_name)
                     # Broadcast typing to all room subscribers (UX-005)
-                    subscribers = await presence_mgr.get_room_subscribers(websocket_id)
-                    for sub_agent, sub_ws in subscribers:
-                        if sub_agent != agent_name:
-                            try:
-                                await sub_ws.send_json({
-                                    "type": "typing",
-                                    "sender": agent_name,
-                                    "room_id": current_room,
-                                    "timestamp": datetime.utcnow().isoformat()
-                                })
-                            except Exception:
-                                pass
+                    room_id = msg.get("room_id")
+                    if room_id:
+                        subscribers = await presence_mgr.get_subscribers(room_id)
+                        for sub_agent, sub_ws in subscribers:
+                            if sub_agent != agent_name:
+                                try:
+                                    await sub_ws.send_json({
+                                        "type": "typing",
+                                        "sender": agent_name,
+                                        "room_id": room_id,
+                                        "timestamp": datetime.now(timezone.utc).isoformat()
+                                    })
+                                except Exception:
+                                    pass
                 
                 elif action == "heartbeat":
                     await presence_mgr.record_heartbeat(agent_name)
