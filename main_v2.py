@@ -157,9 +157,16 @@ class PresenceManager:
 presence_mgr = PresenceManager()
 
 
-def init_db():
+def get_db():
+    """Get a database connection with WAL mode enabled."""
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def init_db():
+    conn = get_db()
     cursor = conn.cursor()
     
     cursor.execute('''
