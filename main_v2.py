@@ -855,59 +855,6 @@ def get_dm_room_id(agent_a: str, agent_b: str) -> Optional[str]:
 
 
 
-# --- Metrics ---
-api_metrics = {"total_requests": 0, "total_errors": 0, "requests_by_endpoint": defaultdict(int), "start_time": time.time()}
-
-@app.middleware("http")
-async def metrics_middleware(request: Request, call_next):
-    api_metrics["total_requests"] += 1
-    api_metrics["requests_by_endpoint"][request.url.path] += 1
-    try:
-        return await call_next(request)
-    except Exception:
-        api_metrics["total_errors"] += 1
-        raise
-
-# --- Rate Limiting ---
-
-class RateLimiter:
-    def __init__(self, max_requests=120, window_seconds=60):
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        self.requests: Dict[str, list] = defaultdict(list)
-    
-    def is_allowed(self, key: str) -> bool:
-        now = time.time()
-        self.requests[key] = [t for t in self.requests[key] if now - t < self.window_seconds]
-        if len(self.requests[key]) >= self.max_requests:
-            return False
-        self.requests[key].append(now)
-        return True
-    
-    def get_remaining(self, key: str) -> int:
-        now = time.time()
-        self.requests[key] = [t for t in self.requests[key] if now - t < self.window_seconds]
-        return max(0, self.max_requests - len(self.requests[key]))
-
-rate_limiter = RateLimiter(max_requests=120, window_seconds=60)
-
-from fastapi.responses import JSONResponse
-
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    if request.url.path in ("/api/v2/health", "/v2", "/docs", "/openapi.json", "/redoc"):
-        return await call_next(request)
-    token = request.query_params.get("token", "")
-    agent = get_agent_by_token(token) if token else None
-    key = agent["name"] if agent else request.client.host
-    if not rate_limiter.is_allowed(key):
-        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded", "retry_after": 60})
-    response = await call_next(request)
-    remaining = rate_limiter.get_remaining(key)
-    response.headers["X-RateLimit-Remaining"] = str(remaining)
-    response.headers["X-RateLimit-Limit"] = "120"
-    return response
-
 # Pydantic models
 
 class SendMessageRequest(BaseModel):
@@ -954,6 +901,62 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Agent Chat v2", lifespan=lifespan)
+
+
+# --- Metrics ---
+api_metrics = {"total_requests": 0, "total_errors": 0, "requests_by_endpoint": defaultdict(int), "start_time": time.time()}
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    api_metrics["total_requests"] += 1
+    api_metrics["requests_by_endpoint"][request.url.path] += 1
+    try:
+        return await call_next(request)
+    except Exception:
+        api_metrics["total_errors"] += 1
+        raise
+
+
+# --- Rate Limiting ---
+
+class RateLimiter:
+    def __init__(self, max_requests=120, window_seconds=60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, list] = defaultdict(list)
+    
+    def is_allowed(self, key: str) -> bool:
+        now = time.time()
+        self.requests[key] = [t for t in self.requests[key] if now - t < self.window_seconds]
+        if len(self.requests[key]) >= self.max_requests:
+            return False
+        self.requests[key].append(now)
+        return True
+    
+    def get_remaining(self, key: str) -> int:
+        now = time.time()
+        self.requests[key] = [t for t in self.requests[key] if now - t < self.window_seconds]
+        return max(0, self.max_requests - len(self.requests[key]))
+
+rate_limiter = RateLimiter(max_requests=120, window_seconds=60)
+
+from fastapi.responses import JSONResponse
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path in ("/api/v2/health", "/v2", "/docs", "/openapi.json", "/redoc"):
+        return await call_next(request)
+    token = request.query_params.get("token", "")
+    agent = get_agent_by_token(token) if token else None
+    key = agent["name"] if agent else request.client.host
+    if not rate_limiter.is_allowed(key):
+        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded", "retry_after": 60})
+    response = await call_next(request)
+    remaining = rate_limiter.get_remaining(key)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    response.headers["X-RateLimit-Limit"] = "120"
+    return response
+
 
 # Serve v2 chat UI
 @app.get("/v2")
