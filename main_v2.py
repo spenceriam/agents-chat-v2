@@ -3,6 +3,7 @@ Agent Chat Server v2
 Structured messaging, channels, DMs, and notification inbox for AI agents.
 Parallel deployment with v1 (port 8081).
 """
+import base64
 import json
 import os
 import sqlite3
@@ -232,6 +233,8 @@ def init_db():
             structured TEXT,
             requires_human BOOLEAN DEFAULT FALSE,
             mentions_spencer BOOLEAN DEFAULT FALSE,
+            image_url TEXT,
+            image_type TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -394,6 +397,43 @@ def init_db():
         cursor.execute("ALTER TABLE messages ADD COLUMN edited_at DATETIME")
     except sqlite3.OperationalError:
         pass
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN image_url TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN image_type TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    # Message reactions (UX-002)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_reactions (
+            message_id TEXT REFERENCES messages(id),
+            agent_name TEXT,
+            emoji TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (message_id, agent_name, emoji)
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id)
+    ''')
+
+    # Pinned messages (UX-004)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pinned_messages (
+            id TEXT PRIMARY KEY,
+            room_id TEXT REFERENCES rooms(id),
+            message_id TEXT REFERENCES messages(id),
+            pinned_by TEXT,
+            content_preview TEXT,
+            pinned_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_pinned_room ON pinned_messages(room_id)
+    ''')
 
     conn.commit()
     conn.close()
@@ -545,6 +585,138 @@ def get_unacked_messages(agent_name: str, limit: int = 20) -> list:
     results = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return results
+
+
+# --- Message Reactions (UX-002) ---
+ALLOWED_EMOJIS = {"👍", "👎", "❤️", "😂", "🎉", "🚀", "👀", "💯", "✅", "🔥", "⭐", "👏", "💡", "🤔", "😅", "🎯"}
+
+def add_reaction(message_id: str, agent_name: str, emoji: str) -> dict:
+    """Add a reaction to a message. Returns reaction state."""
+    if emoji not in ALLOWED_EMOJIS:
+        return {"error": f"Emoji not in allowed set: {emoji}"}
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    # Check message exists
+    cursor.execute("SELECT room_id FROM messages WHERE id = ?", (message_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {"error": "Message not found"}
+    room_id = row[0]
+    cursor.execute(
+        "INSERT INTO message_reactions (message_id, agent_name, emoji) VALUES (?, ?, ?)\n           ON CONFLICT(message_id, agent_name, emoji) DO NOTHING",
+        (message_id, agent_name, emoji)
+    )
+    conn.commit()
+    # Get updated reactions for this message
+    cursor.execute(
+        "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
+        (message_id,)
+    )
+    reactions = [{"emoji": r[0], "count": r[1], "agents": r[2].split(",")} for r in cursor.fetchall()]
+    conn.close()
+    return {"message_id": message_id, "room_id": room_id, "reactions": reactions}
+
+def remove_reaction(message_id: str, agent_name: str, emoji: str) -> dict:
+    """Remove a reaction from a message."""
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT room_id FROM messages WHERE id = ?", (message_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {"error": "Message not found"}
+    room_id = row[0]
+    cursor.execute(
+        "DELETE FROM message_reactions WHERE message_id = ? AND agent_name = ? AND emoji = ?",
+        (message_id, agent_name, emoji)
+    )
+    conn.commit()
+    cursor.execute(
+        "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
+        (message_id,)
+    )
+    reactions = [{"emoji": r[0], "count": r[1], "agents": r[2].split(",")} for r in cursor.fetchall()]
+    conn.close()
+    return {"message_id": message_id, "room_id": room_id, "reactions": reactions}
+
+def get_message_reactions(message_id: str) -> list:
+    """Get all reactions for a message."""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
+        (message_id,)
+    )
+    reactions = [{"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")} for r in cursor.fetchall()]
+    conn.close()
+    return reactions
+
+def get_room_reactions(room_id: str, limit: int = 50) -> dict:
+    """Get reactions for recent messages in a room. Returns {message_id: [reactions]}."""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (room_id, limit)
+    )
+    msg_ids = [r["id"] for r in cursor.fetchall()]
+    result = {}
+    for mid in msg_ids:
+        cursor.execute(
+            "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji",
+            (mid,)
+        )
+        reactions = [{"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")} for r in cursor.fetchall()]
+        if reactions:
+            result[mid] = reactions
+    conn.close()
+    return result
+
+# --- Message Pinning (UX-004) ---
+def pin_message(message_id: str, room_id: str, pinned_by: str) -> dict:
+    """Pin a message to the top of a room."""
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT content FROM messages WHERE id = ? AND room_id = ?", (message_id, room_id))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {"error": "Message not found in this room"}
+    content_preview = row[0][:200] if row[0] else ""
+    pin_id = str(uuid.uuid4())
+    cursor.execute(
+        "INSERT OR REPLACE INTO pinned_messages (id, room_id, message_id, pinned_by, content_preview) VALUES (?, ?, ?, ?, ?)",
+        (pin_id, room_id, message_id, pinned_by, content_preview)
+    )
+    conn.commit()
+    conn.close()
+    return {"id": pin_id, "room_id": room_id, "message_id": message_id, "pinned_by": pinned_by, "content_preview": content_preview}
+
+def unpin_message(room_id: str, message_id: str) -> bool:
+    """Unpin a message from a room."""
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM pinned_messages WHERE room_id = ? AND message_id = ?", (room_id, message_id))
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+def get_pinned_messages(room_id: str) -> list:
+    """Get all pinned messages for a room."""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, message_id, pinned_by, content_preview, pinned_at FROM pinned_messages WHERE room_id = ? ORDER BY pinned_at DESC",
+        (room_id,)
+    )
+    pins = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return pins
 
 
 def search_messages(query: str, room_id: str = None, sender: str = None, limit: int = 50) -> list:
@@ -780,16 +952,17 @@ def get_thread_messages(thread_id: str, limit: int = 50, before_id: str = None) 
 
 def save_thread_message(thread_id: str, room_id: str, sender: str, content: str,
                         structured: dict = None, requires_human: bool = False,
-                        mentions_spencer: bool = False) -> str:
+                        mentions_spencer: bool = False,
+                        image_url: str = None, image_type: str = None) -> str:
     msg_id = str(uuid.uuid4())
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO messages (id, room_id, thread_id, sender, content, structured, requires_human, mentions_spencer, is_deleted) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE)",
+        "INSERT INTO messages (id, room_id, thread_id, sender, content, structured, requires_human, mentions_spencer, is_deleted, image_url, image_type) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?)",
         (msg_id, room_id, thread_id, sender, content,
          json.dumps(structured) if structured else None,
-         requires_human, mentions_spencer)
+         requires_human, mentions_spencer, image_url, image_type)
     )
     conn.commit()
     conn.close()
@@ -798,16 +971,17 @@ def save_thread_message(thread_id: str, room_id: str, sender: str, content: str,
 
 
 def save_message(room_id: str, sender: str, content: str, structured: dict = None,
-                 requires_human: bool = False, mentions_spencer: bool = False) -> str:
+                 requires_human: bool = False, mentions_spencer: bool = False,
+                 image_url: str = None, image_type: str = None) -> str:
     msg_id = str(uuid.uuid4())
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
     cursor.execute(
-        """INSERT INTO messages (id, room_id, sender, content, structured, requires_human, mentions_spencer, is_deleted)
-           VALUES (?, ?, ?, ?, ?, ?, ?, FALSE)""",
+        """INSERT INTO messages (id, room_id, sender, content, structured, requires_human, mentions_spencer, is_deleted, image_url, image_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?)""",
         (msg_id, room_id, sender, content,
          json.dumps(structured) if structured else None,
-         requires_human, mentions_spencer)
+         requires_human, mentions_spencer, image_url, image_type)
     )
     conn.commit()
     conn.close()
@@ -940,13 +1114,19 @@ def get_room_messages(room_id: str, limit: int = 50, before_id: str = None) -> L
         )
     
     rows = cursor.fetchall()
-    conn.close()
     messages = []
     for row in reversed(rows):
         msg = dict(row)
         if msg.get("structured"):
             msg["structured"] = json.loads(msg["structured"])
+        # Include reactions for each message
+        cursor.execute(
+            "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
+            (msg["id"],)
+        )
+        msg["reactions"] = [{"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")} for r in cursor.fetchall()]
         messages.append(msg)
+    conn.close()
     return messages
 
 
@@ -1021,9 +1201,11 @@ def get_dm_room_id(agent_a: str, agent_b: str) -> Optional[str]:
 
 # Pydantic models
 class SendMessageRequest(BaseModel):
-    content: str
+    content: str = ""
     structured: Optional[dict] = None
     room_id: str = "general"
+    image_url: Optional[str] = None  # Screenshot/image reference (file path or URL)
+    image_type: Optional[str] = None  # MIME type: "image/png", "image/jpeg"
 
 
 class CreateChannelRequest(BaseModel):
@@ -1048,8 +1230,10 @@ class CreateThreadRequest(BaseModel):
 
 
 class SendThreadMessageRequest(BaseModel):
-    content: str
+    content: str = ""
     structured: Optional[dict] = None
+    image_url: Optional[str] = None
+    image_type: Optional[str] = None
 
 
 class ThreadUpdateRequest(BaseModel):
@@ -1085,6 +1269,189 @@ async def get_me(token: str):
     return {"name": agent["name"], "metadata": agent.get("metadata", {})}
 
 
+# --- Screenshot/Image Upload ---
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
+ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+class UploadImageRequest(BaseModel):
+    filename: str
+    data: str  # base64-encoded image data
+    content_type: str  # MIME type
+
+
+# --- Reactions & Pinning Models (UX-002, UX-004) ---
+class ReactionRequest(BaseModel):
+    emoji: str
+
+class PinRequest(BaseModel):
+    message_id: str
+
+
+@app.post("/api/v2/screenshots")
+async def upload_screenshot(token: str, req: UploadImageRequest):
+    """Upload a screenshot/image. Returns the URL for use in message image_url field."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    
+    # Validate content type
+    if req.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported image type: {req.content_type}. Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}"
+        )
+    
+    # Decode and validate size
+    try:
+        image_bytes = base64.b64decode(req.data)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 data")
+    
+    if len(image_bytes) > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image too large: {len(image_bytes)} bytes. Max: {MAX_IMAGE_SIZE} bytes (5MB)"
+        )
+    
+    # Sanitize filename
+    safe_name = "".join(c for c in req.filename if c.isalnum() or c in "._-")
+    if not safe_name:
+        safe_name = "screenshot"
+    ext = ".png" if req.content_type == "image/png" else ".jpg" if req.content_type == "image/jpeg" else ".gif" if req.content_type == "image/gif" else ".webp"
+    
+    # Generate unique filename
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    unique_name = f"{agent['name']}_{timestamp}_{safe_name}{ext}"
+    screenshots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
+    os.makedirs(screenshots_dir, exist_ok=True)
+    file_path = os.path.join(screenshots_dir, unique_name)
+    
+    with open(file_path, "wb") as f:
+        f.write(image_bytes)
+    
+    # Return the URL path (served via static route)
+    image_url = f"/screenshots/{unique_name}"
+    return {"status": "uploaded", "url": image_url, "size": len(image_bytes), "content_type": req.content_type}
+
+
+@app.get("/screenshots/{filename}")
+async def serve_screenshot(filename: str):
+    """Serve uploaded screenshots."""
+    # Security: prevent directory traversal
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    screenshots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
+    file_path = os.path.join(screenshots_dir, filename)
+    
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    
+    # Determine content type from extension
+    ext = os.path.splitext(filename)[1].lower()
+    content_type_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+    content_type = content_type_map.get(ext, "application/octet-stream")
+    
+    return FileResponse(file_path, media_type=content_type)
+
+
+# --- Reaction Endpoints (UX-002) ---
+@app.post("/api/v2/messages/{msg_id}/reactions")
+async def add_reaction_endpoint(msg_id: str, token: str, req: ReactionRequest):
+    """Add a reaction emoji to a message."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    result = add_reaction(msg_id, agent["name"], req.emoji)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    # Broadcast reaction update to room
+    asyncio.create_task(broadcast_to_room(result["room_id"], {
+        "type": "reaction",
+        "event": "added",
+        "message_id": msg_id,
+        "agent_name": agent["name"],
+        "emoji": req.emoji,
+        "reactions": result["reactions"],
+        "timestamp": datetime.utcnow().isoformat()
+    }))
+    return result
+
+@app.delete("/api/v2/messages/{msg_id}/reactions/{emoji}")
+async def remove_reaction_endpoint(msg_id: str, emoji: str, token: str):
+    """Remove a reaction emoji from a message."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    result = remove_reaction(msg_id, agent["name"], emoji)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    asyncio.create_task(broadcast_to_room(result["room_id"], {
+        "type": "reaction",
+        "event": "removed",
+        "message_id": msg_id,
+        "agent_name": agent["name"],
+        "emoji": emoji,
+        "reactions": result["reactions"],
+        "timestamp": datetime.utcnow().isoformat()
+    }))
+    return result
+
+@app.get("/api/v2/messages/{msg_id}/reactions")
+async def get_reactions_endpoint(msg_id: str, token: str):
+    """Get all reactions for a message."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    return {"message_id": msg_id, "reactions": get_message_reactions(msg_id)}
+
+@app.get("/api/v2/rooms/{room_id}/pinned")
+async def get_pinned_endpoint(room_id: str, token: str):
+    """Get all pinned messages for a room."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    return {"room_id": room_id, "pinned": get_pinned_messages(room_id)}
+
+# --- Pinning Endpoints (UX-004) ---
+@app.post("/api/v2/rooms/{room_id}/pin")
+async def pin_endpoint(room_id: str, token: str, req: PinRequest):
+    """Pin a message in a room."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    result = pin_message(req.message_id, room_id, agent["name"])
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    asyncio.create_task(broadcast_to_room(room_id, {
+        "type": "pin",
+        "event": "added",
+        "room_id": room_id,
+        "message_id": req.message_id,
+        "pinned_by": agent["name"],
+        "pin": result,
+        "timestamp": datetime.utcnow().isoformat()
+    }))
+    return result
+
+@app.delete("/api/v2/rooms/{room_id}/pin/{message_id}")
+async def unpin_endpoint(room_id: str, message_id: str, token: str):
+    """Unpin a message from a room."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    result = unpin_message(room_id, message_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Pin not found")
+    asyncio.create_task(broadcast_to_room(room_id, {
+        "type": "pin",
+        "event": "removed",
+        "room_id": room_id,
+        "message_id": message_id,
+        "unpinned_by": agent["name"],
+        "timestamp": datetime.utcnow().isoformat()
+    }))
+    return {"status": "unpinned", "room_id": room_id, "message_id": message_id}
 
 
 def edit_message(msg_id: str, content: str) -> bool:
@@ -1295,7 +1662,8 @@ async def send_thread_message(thread_id: str, token: str, req: SendThreadMessage
     requires_human = req.structured.get("requires_human", False) if req.structured else False
 
     msg_id = save_thread_message(thread_id, thread["parent_channel_id"], agent["name"],
-                                 req.content, req.structured, requires_human, mentions_spencer)
+                                 req.content, req.structured, requires_human, mentions_spencer,
+                                 req.image_url, req.image_type)
 
     await notify_mentions_ws(thread["parent_channel_id"], agent["name"], req.content, msg_id)
 
@@ -1310,6 +1678,8 @@ async def send_thread_message(thread_id: str, token: str, req: SendThreadMessage
         "structured": req.structured,
         "requires_human": requires_human,
         "mentions_spencer": mentions_spencer,
+        "image_url": req.image_url,
+        "image_type": req.image_type,
         "timestamp": datetime.utcnow().isoformat()
     })
 
@@ -1383,7 +1753,7 @@ async def send_channel_message(room_id: str, token: str, req: SendMessageRequest
     requires_human = req.structured.get("requires_human", False) if req.structured else False
     
     msg_id = save_message(room_id, agent["name"], req.content, req.structured,
-                          requires_human, mentions_spencer)
+                          requires_human, mentions_spencer, req.image_url, req.image_type)
 
     await notify_mentions_ws(room_id, agent["name"], req.content, msg_id)
 
@@ -1397,6 +1767,8 @@ async def send_channel_message(room_id: str, token: str, req: SendMessageRequest
         "structured": req.structured,
         "requires_human": requires_human,
         "mentions_spencer": mentions_spencer,
+        "image_url": req.image_url,
+        "image_type": req.image_type,
         "timestamp": datetime.utcnow().isoformat()
     })
     
@@ -1500,7 +1872,7 @@ async def send_dm_message(other_agent: str, token: str, req: SendMessageRequest)
     requires_human = req.structured.get("requires_human", False) if req.structured else False
 
     msg_id = save_message(room_id, agent["name"], req.content, req.structured,
-                          requires_human, mentions_spencer)
+                          requires_human, mentions_spencer, req.image_url, req.image_type)
 
     await notify_mentions_ws(room_id, agent["name"], req.content, msg_id)
 
@@ -1513,6 +1885,8 @@ async def send_dm_message(other_agent: str, token: str, req: SendMessageRequest)
         "structured": req.structured,
         "requires_human": requires_human,
         "mentions_spencer": mentions_spencer,
+        "image_url": req.image_url,
+        "image_type": req.image_type,
         "timestamp": datetime.utcnow().isoformat()
     })
 
@@ -1805,6 +2179,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 
                 elif action == "typing":
                     await presence_mgr.set_typing(agent_name)
+                    # Broadcast typing to all room subscribers (UX-005)
+                    subscribers = await presence_mgr.get_room_subscribers(websocket_id)
+                    for sub_agent, sub_ws in subscribers:
+                        if sub_agent != agent_name:
+                            try:
+                                await sub_ws.send_json({
+                                    "type": "typing",
+                                    "sender": agent_name,
+                                    "room_id": current_room,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                })
+                            except Exception:
+                                pass
                 
                 elif action == "heartbeat":
                     await presence_mgr.record_heartbeat(agent_name)
@@ -1843,6 +2230,60 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                         await ws.send_json(notification)
                                     except Exception:
                                         pass
+
+                elif action == "reaction":
+                    # Add/remove reaction via WebSocket
+                    message_id = msg.get("message_id")
+                    emoji = msg.get("emoji")
+                    remove = msg.get("remove", False)
+                    if not message_id or not emoji:
+                        continue
+                    if remove:
+                        result = remove_reaction(message_id, agent_name, emoji)
+                        event_type = "removed"
+                    else:
+                        result = add_reaction(message_id, agent_name, emoji)
+                        event_type = "added"
+                    if "error" not in result:
+                        await broadcast_to_room(result["room_id"], {
+                            "type": "reaction",
+                            "event": event_type,
+                            "message_id": message_id,
+                            "agent_name": agent_name,
+                            "emoji": emoji,
+                            "reactions": result["reactions"],
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+
+                elif action == "pin":
+                    # Pin/unpin message via WebSocket
+                    room_id = msg.get("room_id")
+                    message_id = msg.get("message_id")
+                    unpin = msg.get("unpin", False)
+                    if not room_id or not message_id:
+                        continue
+                    if unpin:
+                        unpin_message(room_id, message_id)
+                        await broadcast_to_room(room_id, {
+                            "type": "pin",
+                            "event": "removed",
+                            "room_id": room_id,
+                            "message_id": message_id,
+                            "unpinned_by": agent_name,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                    else:
+                        result = pin_message(message_id, room_id, agent_name)
+                        if "error" not in result:
+                            await broadcast_to_room(room_id, {
+                                "type": "pin",
+                                "event": "added",
+                                "room_id": room_id,
+                                "message_id": message_id,
+                                "pinned_by": agent_name,
+                                "pin": result,
+                                "timestamp": datetime.utcnow().isoformat()
+                            })
                 
                 elif action == "send":
                     if not await rate_limiter.consume(agent_name):
@@ -1857,12 +2298,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     room_id = msg.get("room_id", "general")
                     content = msg.get("content", "")
                     structured = msg.get("structured")
+                    image_url = msg.get("image_url")
+                    image_type = msg.get("image_type")
                     
                     mentions_spencer = "@Spencer" in content
                     requires_human = structured.get("requires_human", False) if structured else False
                     
                     msg_id = save_message(room_id, agent_name, content, structured,
-                                          requires_human, mentions_spencer)
+                                          requires_human, mentions_spencer, image_url, image_type)
 
                     await broadcast_to_room(room_id, {
                         "type": "message",
@@ -1873,6 +2316,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "structured": structured,
                         "requires_human": requires_human,
                         "mentions_spencer": mentions_spencer,
+                        "image_url": image_url,
+                        "image_type": image_type,
                         "timestamp": datetime.utcnow().isoformat()
                     })
                     # Confirm message was sent and broadcast
@@ -1915,12 +2360,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     thread_id = msg.get("thread_id")
                     content = msg.get("content", "")
                     structured = msg.get("structured")
+                    image_url = msg.get("image_url")
+                    image_type = msg.get("image_type")
                     thread = get_thread(thread_id) if thread_id else None
                     if thread and not thread.get("is_archived"):
                         mentions_spencer = "@Spencer" in content
                         requires_human = structured.get("requires_human", False) if structured else False
                         msg_id = save_thread_message(thread_id, thread["parent_channel_id"], agent_name,
-                                                     content, structured, requires_human, mentions_spencer)
+                                                     content, structured, requires_human, mentions_spencer,
+                                                     image_url, image_type)
                         await notify_mentions_ws(thread["parent_channel_id"], agent_name, content, msg_id)
                         await broadcast_to_room(thread["parent_channel_id"], {
                             "type": "message", "id": msg_id,
@@ -1928,6 +2376,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             "sender": agent_name, "content": content,
                             "structured": structured, "requires_human": requires_human,
                             "mentions_spencer": mentions_spencer,
+                            "image_url": image_url,
+                            "image_type": image_type,
                             "timestamp": datetime.utcnow().isoformat()
                         })
                         # Notify sender via ack that thread message was broadcast

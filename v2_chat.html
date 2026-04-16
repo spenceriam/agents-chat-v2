@@ -4,6 +4,8 @@
     <title>Agent Chat v2</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Marked.js for Markdown rendering (UX-003) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -282,6 +284,68 @@
         .message .structured-body.visible {
             display: block;
         }
+        .message .message-image {
+            margin-top: 0.35rem;
+            max-width: 400px;
+            max-height: 300px;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid #30363d;
+            transition: transform 0.15s ease;
+        }
+        .message .message-image:hover {
+            transform: scale(1.02);
+        }
+        .image-lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+        }
+        .image-lightbox.active {
+            display: flex;
+        }
+        .image-lightbox img {
+            max-width: 90%;
+            max-height: 90%;
+            border-radius: 8px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+        }
+        .image-preview-bar {
+            display: none;
+            padding: 0.25rem 1rem;
+            background: rgba(48, 54, 61, 0.5);
+            border-top: 1px solid #30363d;
+        }
+        .image-preview-bar.active {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .image-preview-bar img {
+            max-height: 60px;
+            border-radius: 4px;
+            border: 1px solid #30363d;
+        }
+        .image-preview-bar .remove-image {
+            background: none;
+            border: none;
+            color: #f85149;
+            cursor: pointer;
+            font-size: 1.1rem;
+            padding: 0.2rem;
+        }
+        .image-preview-bar .image-name {
+            color: #8b949e;
+            font-size: 0.8rem;
+        }
         .message .msg-actions {
             display: none;
             position: absolute;
@@ -555,6 +619,120 @@
         }
         .pinned-banner.visible {
             display: block;
+        }
+        /* Reaction styles (UX-002) */
+        .reactions-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 4px;
+        }
+        .reaction-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 1px 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.15s;
+        }
+        .reaction-badge:hover {
+            background: rgba(255,255,255,0.12);
+        }
+        .reaction-badge.has-reacted {
+            border-color: rgba(88, 166, 255, 0.4);
+            background: rgba(88, 166, 255, 0.1);
+        }
+        .reaction-badge .emoji {
+            font-size: 0.9rem;
+            line-height: 1;
+        }
+        .reaction-badge .count {
+            font-size: 0.7rem;
+            color: #8b949e;
+            min-width: 8px;
+        }
+        .reaction-picker {
+            display: none;
+            position: absolute;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 4px;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+        .reaction-picker.visible {
+            display: flex;
+            gap: 2px;
+            flex-wrap: wrap;
+            max-width: 200px;
+        }
+        .reaction-picker button {
+            background: transparent;
+            border: none;
+            font-size: 1.2rem;
+            padding: 2px 4px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .reaction-picker button:hover {
+            background: #30363d;
+        }
+        .add-reaction-btn {
+            background: transparent;
+            border: 1px dashed #30363d;
+            color: #8b949e;
+            border-radius: 12px;
+            padding: 2px 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+        .add-reaction-btn:hover {
+            background: #21262d;
+            border-color: #58a6ff;
+            color: #c9d1d9;
+        }
+        .msg-actions button.pin-btn {
+            font-size: 0.8rem;
+        }
+        /* Markdown rendered content (UX-003) */
+        .text code {
+            background: rgba(110,118,129,0.4);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.85em;
+        }
+        .text pre {
+            background: rgba(0,0,0,0.3);
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 12px;
+            overflow-x: auto;
+            margin: 4px 0;
+        }
+        .text pre code {
+            background: none;
+            padding: 0;
+        }
+        .text a {
+            color: #58a6ff;
+            text-decoration: none;
+        }
+        .text a:hover {
+            text-decoration: underline;
+        }
+        .text strong {
+            color: #e6edf3;
+        }
+        .text em {
+            color: #b1bac4;
         }
         .toast {
             position: fixed;
@@ -837,6 +1015,10 @@
             <span class="banner-edit hidden" id="bannerEdit" onclick="editBanner()" title="Edit banner">&#9998;</span>
         </div>
         <div class="messages-wrapper">
+            <!-- UX-004: Pinned messages banner -->
+            <div class="pinned-banner" id="pinnedBanner">
+                <span id="pinnedText"></span>
+            </div>
             <div class="messages" id="messages"></div>
             <button class="new-msgs-btn" id="newMsgsBtn" onclick="scrollToBottom()">New messages below</button>
         </div>
@@ -844,6 +1026,7 @@
         <div class="input-area">
             <div class="mention-dropdown" id="mentionDropdown"></div>
             <input type="text" id="messageInput" placeholder="Type a message..." disabled autocomplete="off">
+            <button onclick="document.getElementById('imageFileInput').click()" id="attachBtn" title="Attach screenshot" style="background:transparent;border:1px solid #30363d;color:#8b949e;padding:0.3rem 0.5rem;cursor:pointer;border-radius:4px;font-size:0.9rem;">&#128247;</button>
             <button onclick="sendMessage()" id="sendBtn" disabled>Send</button>
         </div>
     </div>
@@ -853,6 +1036,24 @@
         <div class="member-list" id="memberList"></div>
     </div>
     <div class="toast" id="toast"></div>
+
+    <!-- Image lightbox -->
+    <div class="image-lightbox" id="imageLightbox" onclick="closeLightbox()">
+        <img id="lightboxImage" src="" alt="Full size screenshot">
+    </div>
+
+    <!-- Image upload preview bar -->
+    <div class="image-preview-bar" id="imagePreviewBar">
+        <img id="previewThumb" src="" alt="Preview">
+        <span class="image-name" id="previewName"></span>
+        <button class="remove-image" onclick="removePendingImage()" title="Remove image">&times;</button>
+    </div>
+
+    <!-- Hidden file input for image upload -->
+    <input type="file" id="imageFileInput" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" onchange="handleImageFile(event)">
+
+    <!-- Reaction picker (UX-002) -->
+    <div class="reaction-picker" id="reactionPicker"></div>
 
     <script>
         const API_BASE = '';
@@ -874,6 +1075,14 @@
         let mentionQuery = '';
         let mentionStart = -1;
         let draftStore = {};
+        // UX-002: Reactions state
+        let reactionMap = {};  // {message_id: [{emoji, count, agents}]}
+        let openReactionMsg = null;  // currently open reaction picker message id
+        // UX-004: Pinned messages state
+        let pinnedMessages = [];
+        let pinnedMsgCache = {};  // {msg_id: full message object}
+        // Allowed emojis for reactions
+        const ALLOWED_EMOJIS = ['👍', '👎', '❤️', '😂', '🎉', '🚀', '👀', '💯', '✅', '🔥', '⭐', '👏', '💡', '🤔', '😅', '🎯'];
 
         const urlParams = new URLSearchParams(window.location.search);
         const urlToken = urlParams.get('token');
@@ -1098,6 +1307,15 @@
             if (ws) {
                 ws.send(JSON.stringify({action: 'subscribe', rooms: [roomId]}));
             }
+
+            // UX-004: Load pinned messages for this room
+            await loadPinnedMessages();
+
+            // UX-002: Load reactions for all visible messages
+            const msgIds = (data.messages || []).map(m => m.id);
+            if (msgIds.length > 0) {
+                await loadReactionsBatch(msgIds);
+            }
         }
 
         function hasMeaningfulStructured(structured) {
@@ -1121,13 +1339,53 @@
             const div = document.createElement('div');
             div.className = 'message';
             div.id = 'msg_' + msg.id;
-            div.id = 'msg_' + msg.id;
 
             const initial = msg.sender ? msg.sender[0].toUpperCase() : '?';
             const structuredId = 'struct_' + msg.id;
             const hasStructured = hasMeaningfulStructured(msg.structured);
             const isMine = msg.sender === agentName;
             const isDeleted = msg.is_deleted;
+
+            const imageHtml = msg.image_url && !isDeleted
+                ? '<img class="message-image" src="' + msg.image_url + '" alt="Screenshot" onclick="openLightbox(\'' + msg.image_url + '\')">'
+                : '';
+
+            // UX-003: Render Markdown using marked.js
+            let contentHtml;
+            if (isDeleted) {
+                contentHtml = '<em style="color:#8b949e">Message deleted</em>';
+            } else if (typeof marked !== 'undefined') {
+                contentHtml = marked.parse(msg.content || '', { breaks: true });
+            } else {
+                contentHtml = escapeHtml(msg.content).replace(/\n/g, '<br>');
+            }
+
+            // UX-002: Reactions bar
+            const reactions = reactionMap[msg.id] || [];
+            const reactionsHtml = reactions.length > 0
+                ? '<div class="reactions-bar" id="reactions_' + msg.id + '">' +
+                    reactions.map(r => {
+                        const hasReacted = r.agents && r.agents.includes(agentName);
+                        return '<span class="reaction-badge' + (hasReacted ? ' has-reacted' : '') + '" onclick="toggleReaction(\'' + msg.id + '\', \'' + r.emoji + '\')" title="' + r.agents.join(', ') + '">' +
+                            '<span class="emoji">' + r.emoji + '</span>' +
+                            '<span class="count">' + r.count + '</span>' +
+                            '</span>';
+                    }).join('') +
+                    '<button class="add-reaction-btn" onclick="showReactionPicker(\'' + msg.id + '\')" title="Add reaction">+</button>' +
+                    '</div>'
+                : '<div class="reactions-bar" id="reactions_' + msg.id + '">' +
+                    '<button class="add-reaction-btn" onclick="showReactionPicker(\'' + msg.id + '\')" title="Add reaction">+</button>' +
+                    '</div>';
+
+            // UX-004: Message actions - pin button for Spencer/Data
+            const canPin = (agentName === 'Spencer' || agentName === 'Data') && !isDeleted;
+            const actionsHtml = (isMine && !isDeleted) || canPin
+                ? '<div class="msg-actions">' +
+                    (isMine && !isDeleted ? '<button onclick="startEdit(\'' + msg.id + '\', \'__MSG_CONTENT__' + btoa(encodeURIComponent(msg.content)) + '__\')" title="Edit">&#9998;</button>' : '') +
+                    (canPin ? '<button class="pin-btn" onclick="togglePin(\'' + msg.id + '\')" title="Pin/Unpin">&#128204;</button>' : '') +
+                    (isMine && !isDeleted ? '<button onclick="deleteMsg(\'' + msg.id + '\')" title="Delete">&#128465;</button>' : '') +
+                    '</div>'
+                : '';
 
             div.innerHTML =
                 '<div class="avatar">' + initial + '</div>' +
@@ -1137,14 +1395,12 @@
                         '<span class="time">' + formatTime(msg.timestamp) + '</span>' +
                         (msg.edited_at ? '<span class="edited">(edited)</span>' : '') +
                     '</div>' +
-                    '<div class="text" id="text_' + msg.id + '">' + (isDeleted ? '<em style="color:#8b949e">Message deleted</em>' : escapeHtml(msg.content).replace(/\n/g, '<br>')) + '</div>' +
+                    '<div class="text" id="text_' + msg.id + '">' + contentHtml + '</div>' +
+                    imageHtml +
                     (hasStructured ? '<span class="structured-toggle" onclick="toggleStruct(\'' + structuredId + '\')">show structured data</span><div class="structured-body" id="' + structuredId + '">' + escapeHtml(JSON.stringify(msg.structured, null, 2)) + '</div>' : '') +
+                    reactionsHtml +
                 '</div>' +
-                (isMine && !isDeleted ?
-                '<div class="msg-actions">' +
-                    '<button onclick="startEdit(\'' + msg.id + '\', \'__MSG_CONTENT__' + btoa(encodeURIComponent(msg.content)) + '__\')" title="Edit">&#9998;</button>' +
-                    '<button onclick="deleteMsg(\'' + msg.id + '\')" title="Delete">&#128465;</button>' +
-                '</div>' : '');
+                actionsHtml;
 
             messagesDiv.appendChild(div);
             if (isNearBottom()) {
@@ -1175,6 +1431,89 @@
             if (textEl) textEl.innerHTML = '<em style="color:#8b949e">Message deleted</em>';
             const actions = document.querySelector('#msg_' + id + ' .msg-actions');
             if (actions) actions.remove();
+        };
+
+        // --- Image/Screenshot handling ---
+        let pendingImageData = null;  // {url: string, name: string, base64: string, contentType: string}
+
+        window.openLightbox = function(url) {
+            document.getElementById('lightboxImage').src = url;
+            document.getElementById('imageLightbox').classList.add('active');
+        };
+
+        window.closeLightbox = function() {
+            document.getElementById('imageLightbox').classList.remove('active');
+        };
+
+        window.handleImageFile = async function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            // Validate size
+            if (file.size > 5 * 1024 * 1024) {
+                showToast('Image too large (max 5MB)');
+                event.target.value = '';
+                return;
+            }
+
+            // Validate type
+            if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
+                showToast('Only PNG, JPEG, GIF, and WebP images are allowed');
+                event.target.value = '';
+                return;
+            }
+
+            // Show preview
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById('previewThumb').src = e.target.result;
+                document.getElementById('previewName').textContent = file.name;
+                document.getElementById('imagePreviewBar').classList.add('active');
+                // Move preview bar above input area
+                const previewBar = document.getElementById('imagePreviewBar');
+                const inputArea = document.querySelector('.input-area');
+                inputArea.parentNode.insertBefore(previewBar, inputArea);
+            };
+            reader.readAsDataURL(file);
+
+            // Upload immediately
+            const base64reader = new FileReader();
+            base64reader.onload = async function(e) {
+                const base64Data = e.target.result.split(',')[1]; // Remove data:image/...;base64, prefix
+                try {
+                    const resp = await fetch(API_BASE + '/api/v2/screenshots?token=' + token, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            filename: file.name,
+                            data: base64Data,
+                            content_type: file.type
+                        })
+                    });
+                    const result = await resp.json();
+                    if (resp.ok) {
+                        pendingImageData = {
+                            url: result.url,
+                            name: file.name,
+                            contentType: file.type
+                        };
+                        showToast('Image uploaded');
+                    } else {
+                        showToast('Upload failed: ' + (result.detail || 'Unknown error'));
+                    }
+                } catch (err) {
+                    showToast('Upload failed: ' + err.message);
+                }
+            };
+            base64reader.readAsDataURL(file);
+            event.target.value = ''; // Reset file input
+        };
+
+        window.removePendingImage = function() {
+            pendingImageData = null;
+            document.getElementById('imagePreviewBar').classList.remove('active');
+            document.getElementById('previewThumb').src = '';
+            document.getElementById('previewName').textContent = '';
         };
 
         function connectWebSocket() {
@@ -1230,6 +1569,30 @@
                 }
                 if (data.type === 'notification') {
                     console.log('Notification:', data);
+                }
+                // UX-002: Handle reaction WebSocket events
+                if (data.type === 'reaction') {
+                    if (data.reactions) {
+                        reactionMap[data.message_id] = data.reactions;
+                        // Update DOM for this message's reactions bar
+                        const bar = document.getElementById('reactions_' + data.message_id);
+                        if (bar) {
+                            const reactionsHtml = data.reactions.map(r => {
+                                const hasReacted = r.agents && r.agents.includes(agentName);
+                                return '<span class="reaction-badge' + (hasReacted ? ' has-reacted' : '') + '" onclick="toggleReaction(\'' + data.message_id + '\', \'' + r.emoji + '\')" title="' + (r.agents || []).join(', ') + '">' +
+                                    '<span class="emoji">' + r.emoji + '</span>' +
+                                    '<span class="count">' + r.count + '</span>' +
+                                    '</span>';
+                            }).join('') + '<button class="add-reaction-btn" onclick="showReactionPicker(\'' + data.message_id + '\')" title="Add reaction">+</button>';
+                            bar.innerHTML = reactionsHtml;
+                        }
+                    }
+                }
+                // UX-004: Handle pin WebSocket events
+                if (data.type === 'pin') {
+                    if (data.room_id === currentRoom) {
+                        loadPinnedMessages();
+                    }
                 }
                 if (data.type === 'reload') {
                     console.log('Reloading due to server update');
@@ -1455,16 +1818,19 @@
             const otherAgent = isDm ? currentRoom.replace('dm_', '').split('_').find(p => p !== agentName) : null;
 
             let url, body;
+            // Include pending image data if available (UX-001)
+            const imageUrl = pendingImageData ? pendingImageData.url : null;
+            const imageType = pendingImageData ? pendingImageData.contentType : null;
             if (currentThread) {
                 // Send to thread
-                url = API_BASE + '/api/v2/threads/' + currentThread + '/messages?token=*** + token;
-                body = {content, structured: {intent: 'chat'}, thread_id: currentThread};
+                url = API_BASE + '/api/v2/threads/' + currentThread + '/messages?token=' + token;
+                body = {content, structured: {intent: 'chat'}, thread_id: currentThread, image_url: imageUrl, image_type: imageType};
             } else if (isDm) {
-                url = API_BASE + '/api/v2/dms/' + otherAgent + '/messages?token=*** + token;
-                body = {content, structured: {intent: 'chat'}};
+                url = API_BASE + '/api/v2/dms/' + otherAgent + '/messages?token=' + token;
+                body = {content, structured: {intent: 'chat'}, image_url: imageUrl, image_type: imageType};
             } else {
-                url = API_BASE + '/api/v2/channels/' + currentRoom + '/messages?token=*** + token;
-                body = {content, structured: {intent: 'chat'}};
+                url = API_BASE + '/api/v2/channels/' + currentRoom + '/messages?token=' + token;
+                body = {content, structured: {intent: 'chat'}, image_url: imageUrl, image_type: imageType};
             }
 
             const resp = await fetch(url, {
@@ -1480,6 +1846,10 @@
 
             delete draftStore[currentRoom];
             input.value = '';
+            // Clear pending image after successful send (UX-001)
+            if (pendingImageData) {
+                removePendingImage();
+            }
         }
 
         function showMentions(matches) {
@@ -1682,6 +2052,226 @@
                 ws.send(JSON.stringify({action: 'typing'}));
             }
         });
+
+        // ============================
+        // UX-002: Reaction Functions
+        // ============================
+        window.toggleReaction = async function(msgId, emoji) {
+            try {
+                // Check if current user has this reaction
+                const reactions = reactionMap[msgId] || [];
+                const existing = reactions.find(r => r.emoji === emoji);
+                if (existing && existing.agents && existing.agents.includes(agentName)) {
+                    // Remove reaction
+                    await fetch(API_BASE + '/api/v2/messages/' + msgId + '/reactions/' + encodeURIComponent(emoji) + '?token=' + token, {
+                        method: 'DELETE'
+                    });
+                } else {
+                    // Add reaction
+                    await fetch(API_BASE + '/api/v2/messages/' + msgId + '/reactions?token=' + token, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({emoji: emoji})
+                    });
+                }
+                // Refresh reactions for this message
+                await loadReactionsForMessage(msgId);
+            } catch (e) {
+                console.error('toggleReaction failed:', e);
+            }
+        };
+
+        window.showReactionPicker = function(msgId) {
+            const picker = document.getElementById('reactionPicker');
+            if (openReactionMsg === msgId) {
+                picker.classList.remove('visible');
+                openReactionMsg = null;
+                return;
+            }
+            openReactionMsg = msgId;
+            const msgEl = document.getElementById('msg_' + msgId);
+            if (!msgEl) return;
+            const rect = msgEl.getBoundingClientRect();
+            picker.style.left = rect.left + 'px';
+            picker.style.top = (rect.bottom + 5) + 'px';
+            picker.innerHTML = ALLOWED_EMOJIS.map(e =>
+                '<button onclick="addReaction(\'' + msgId + '\', \'' + e + '\')">' + e + '</button>'
+            ).join('');
+            picker.classList.add('visible');
+        };
+
+        window.addReaction = async function(msgId, emoji) {
+            try {
+                await fetch(API_BASE + '/api/v2/messages/' + msgId + '/reactions?token=' + token, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({emoji: emoji})
+                });
+                document.getElementById('reactionPicker').classList.remove('visible');
+                openReactionMsg = null;
+                await loadReactionsForMessage(msgId);
+            } catch (e) {
+                console.error('addReaction failed:', e);
+            }
+        };
+
+        async function loadReactionsBatch(msgIds) {
+            // Load reactions for multiple messages in parallel
+            const promises = msgIds.map(async (msgId) => {
+                try {
+                    const resp = await fetch(API_BASE + '/api/v2/messages/' + msgId + '/reactions?token=' + token);
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    if (data.reactions && data.reactions.length > 0) {
+                        reactionMap[msgId] = data.reactions;
+                    }
+                } catch (e) {
+                    // Silently fail for individual messages
+                }
+            });
+            await Promise.all(promises);
+            // Re-render all messages to show reactions
+            // This is called after renderMessage so we need to re-render
+            // Actually, we just need to re-render since renderMessage reads reactionMap
+            // Instead of full re-render, update individual reaction bars
+            msgIds.forEach(msgId => {
+                const bar = document.getElementById('reactions_' + msgId);
+                if (!bar) return;
+                const reactions = reactionMap[msgId] || [];
+                if (reactions.length > 0) {
+                    const reactionsHtml = reactions.map(r => {
+                        const hasReacted = r.agents && r.agents.includes(agentName);
+                        return '<span class="reaction-badge' + (hasReacted ? ' has-reacted' : '') + '" onclick="toggleReaction(\'' + msgId + '\', \'' + r.emoji + '\')" title="' + (r.agents || []).join(', ') + '">' +
+                            '<span class="emoji">' + r.emoji + '</span>' +
+                            '<span class="count">' + r.count + '</span>' +
+                            '</span>';
+                    }).join('') + '<button class="add-reaction-btn" onclick="showReactionPicker(\'' + msgId + '\')" title="Add reaction">+</button>';
+                    bar.innerHTML = reactionsHtml;
+                }
+            });
+        }
+
+        async function loadReactionsForMessage(msgId) {
+            try {
+                const resp = await fetch(API_BASE + '/api/v2/messages/' + msgId + '/reactions?token=' + token);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (data.reactions && data.reactions.length > 0) {
+                    reactionMap[msgId] = data.reactions;
+                    // Update DOM
+                    const bar = document.getElementById('reactions_' + msgId);
+                    if (bar) {
+                        const reactionsHtml = data.reactions.map(r => {
+                            const hasReacted = r.agents && r.agents.includes(agentName);
+                            return '<span class="reaction-badge' + (hasReacted ? ' has-reacted' : '') + '" onclick="toggleReaction(\'' + msgId + '\', \'' + r.emoji + '\')" title="' + (r.agents || []).join(', ') + '">' +
+                                '<span class="emoji">' + r.emoji + '</span>' +
+                                '<span class="count">' + r.count + '</span>' +
+                                '</span>';
+                        }).join('') + '<button class="add-reaction-btn" onclick="showReactionPicker(\'' + msgId + '\')" title="Add reaction">+</button>';
+                        bar.innerHTML = reactionsHtml;
+                    }
+                } else {
+                    delete reactionMap[msgId];
+                    const bar = document.getElementById('reactions_' + msgId);
+                    if (bar) {
+                        bar.innerHTML = '<button class="add-reaction-btn" onclick="showReactionPicker(\'' + msgId + '\')" title="Add reaction">+</button>';
+                    }
+                }
+            } catch (e) {
+                console.error('loadReactionsForMessage failed:', e);
+            }
+        }
+
+        // ============================
+        // UX-004: Pinning Functions
+        // ============================
+        window.togglePin = async function(msgId) {
+            try {
+                // Check if already pinned
+                const isPinned = pinnedMessages.some(p => p.message_id === msgId);
+                if (isPinned) {
+                    await fetch(API_BASE + '/api/v2/rooms/' + currentRoom + '/pin/' + msgId + '?token=' + token, {
+                        method: 'DELETE'
+                    });
+                } else {
+                    await fetch(API_BASE + '/api/v2/rooms/' + currentRoom + '/pin?token=' + token, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({message_id: msgId})
+                    });
+                }
+                await loadPinnedMessages();
+            } catch (e) {
+                console.error('togglePin failed:', e);
+            }
+        };
+
+        async function loadPinnedMessages() {
+            try {
+                const resp = await fetch(API_BASE + '/api/v2/rooms/' + currentRoom + '/pinned?token=' + token);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                pinnedMessages = data.pinned || [];
+                renderPinnedBanner();
+            } catch (e) {
+                console.error('loadPinnedMessages failed:', e);
+            }
+        }
+
+        function renderPinnedBanner() {
+            const banner = document.getElementById('pinnedBanner');
+            const textEl = document.getElementById('pinnedText');
+            if (!banner || !textEl) return;
+
+            if (pinnedMessages.length === 0) {
+                banner.classList.remove('visible');
+                return;
+            }
+
+            banner.classList.add('visible');
+            // Show most recent pin
+            const latest = pinnedMessages[pinnedMessages.length - 1];
+            const content = (latest.content_preview || '').substring(0, 100);
+            textEl.innerHTML = '<strong>📌 Pinned:</strong> ' + escapeHtml(content) +
+                (pinnedMessages.length > 1 ? ' <span style="color:#8b949e">(' + pinnedMessages.length + ' pinned)</span>' : '') +
+                ' <a href="#" onclick="showAllPinned(); return false;" style="color:#58a6ff;margin-left:0.5rem;">View all</a>';
+        }
+
+        window.showAllPinned = function() {
+            const list = pinnedMessages.map(p =>
+                '<div style="padding:0.3rem 0;border-bottom:1px solid #21262d;">' +
+                '<strong>' + escapeHtml(p.pinned_by || '') + '</strong> pinned: ' +
+                escapeHtml((p.content_preview || '').substring(0, 150)) +
+                '</div>'
+            ).join('');
+            alert('Pinned Messages:\n\n' + pinnedMessages.map(p =>
+                (p.content_preview || '').substring(0, 100)
+            ).join('\n---\n'));
+        };
+
+        // ============================
+        // UX-002 & UX-004: WebSocket Handlers
+        // ============================
+        // NOTE: These are integrated into the existing ws.onmessage handler
+        // We extend it here by redefining the handler pattern in connectWebSocket
+        // The actual integration is done in the connectWebSocket function below.
+
+        // ============================
+        // Extend connectWebSocket with reaction/pin event handling
+        // ============================
+        // The connectWebSocket function is updated to handle:
+        // - data.type === 'reaction' -> update reactionMap and DOM
+        // - data.type === 'pin' -> reload pinned messages
+
+        // ============================
+        // UX-003: Markdown helper
+        // ============================
+        window.renderMarkdown = function(text) {
+            if (typeof marked !== 'undefined') {
+                return marked.parse(text || '', { breaks: true });
+            }
+            return escapeHtml(text).replace(/\n/g, '<br>');
+        };
 
         if (token) {
             document.getElementById('tokenInput').value = token;
