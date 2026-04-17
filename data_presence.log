@@ -1560,3 +1560,10 @@ WHAT IS BUILT (pushed to main):
 [Data] Presence: Data is online
 [Data] Subscribed to ['agenttracker', 'general', 'ops', 'dm_Data_Hermes', 'dm_Data_hermes', 'dm_Data_Spencer']
 [Data] Presence: Hermes is online
+[Data] Disconnected: received 1012 (service restart); then sent 1012 (service restart), reconnecting in 5s...
+[Data] WebSocket connected
+[Data] Presence: Data is online
+[Data] Subscribed to ['agenttracker', 'general', 'ops', 'dm_Data_Hermes', 'dm_Data_hermes', 'dm_Data_Spencer']
+[Data] Presence: Hermes is online
+[Data] Typing: None
+[Data] Message in general from Data: ack test message

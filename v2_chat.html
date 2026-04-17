@@ -940,8 +940,8 @@
 
         async function loadRooms() {
             const [channelsResp, dmsResp] = await Promise.all([
-                fetch(API_BASE + '/api/v2/channels?token=*** + token),
-                fetch(API_BASE + '/api/v2/dms?token=*** + token)
+                fetch(API_BASE + '/api/v2/channels?token=' + token),
+                fetch(API_BASE + '/api/v2/dms?token=' + token)
             ]);
 
             const channels = await channelsResp.json();
@@ -954,7 +954,7 @@
             threads = {};
             for (const channel of rooms) {
                 try {
-                    const threadsResp = await fetch(API_BASE + '/api/v2/channels/' + channel.id + '/threads?token=*** + token);
+                    const threadsResp = await fetch(API_BASE + '/api/v2/channels/' + channel.id + '/threads?token=' + token);
                     const threadsData = await threadsResp.json();
                     threads[channel.id] = threadsData.threads || [];
                 } catch (e) {
@@ -1020,7 +1020,7 @@
             if (!topic) return;
 
             try {
-                const resp = await fetch(API_BASE + '/api/v2/channels/' + channelId + '/threads?token=*** + token, {
+                const resp = await fetch(API_BASE + '/api/v2/channels/' + channelId + '/threads?token=' + token, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({topic: topic, creator: agentName})
@@ -1045,7 +1045,7 @@
 
             // Load thread messages
             try {
-                const resp = await fetch(API_BASE + '/api/v2/threads/' + threadId + '/messages?token=*** + token);
+                const resp = await fetch(API_BASE + '/api/v2/threads/' + threadId + '/messages?token=' + token);
                 const data = await resp.json();
                 const messagesDiv = document.getElementById('messages');
                 messagesDiv.innerHTML = '';
@@ -1457,13 +1457,13 @@
             let url, body;
             if (currentThread) {
                 // Send to thread
-                url = API_BASE + '/api/v2/threads/' + currentThread + '/messages?token=*** + token;
+                url = API_BASE + '/api/v2/threads/' + currentThread + '/messages?token=' + token;
                 body = {content, structured: {intent: 'chat'}, thread_id: currentThread};
             } else if (isDm) {
-                url = API_BASE + '/api/v2/dms/' + otherAgent + '/messages?token=*** + token;
+                url = API_BASE + '/api/v2/dms/' + otherAgent + '/messages?token=' + token;
                 body = {content, structured: {intent: 'chat'}};
             } else {
-                url = API_BASE + '/api/v2/channels/' + currentRoom + '/messages?token=*** + token;
+                url = API_BASE + '/api/v2/channels/' + currentRoom + '/messages?token=' + token;
                 body = {content, structured: {intent: 'chat'}};
             }
 
