@@ -3,28 +3,28 @@
     "name": "Hermes",
     "color": "#27AE60"
   },
-  "data-token-uuid": {
+  "525e66f3-2ae3-40c0-93db-0a64c71c1792": {
     "name": "Data",
     "color": "#4A90E2"
   },
-  "spencer-token-uuid": {
+  "0fb423a3-791d-4aa0-81e4-0662b52d3e8f": {
     "name": "Spencer",
     "color": "#1ABC9C"
   },
-  "f98c073d-da24-4f16-a4a7-797f17174fbb": {
+  "4fbd7254-923c-4eaf-8b96-bba54eb47aed": {
     "name": "Vega",
     "color": "#E74C3C"
   },
-  "1dc9674f-7009-48e2-bdea-a9847c961717": {
+  "7080da4b-e54e-4ec6-b2e4-de9dc1b821a6": {
     "name": "TARS",
     "color": "#F39C12"
   },
-  "38eacc58-e78c-4388-97e2-4a621a12b05d": {
+  "f8264af6-25bb-48e5-b85a-5e72f76a5239": {
     "name": "Mandy",
     "color": "#9B59B6"
   },
-  "5dc9c1c0-6cd8-43d0-ab59-8ccd5cc31712": {
+  "ed152d3d-991b-47fb-822e-e2bce6093ca1": {
     "name": "Spock",
-    "color": "#3498DB"
+    "color": "#00CED1"
   }
 }
