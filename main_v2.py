@@ -2447,11 +2447,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         # Auto-join agent to default channels
         with get_db(row_factory=False) as conn:
             cursor = conn.cursor()
-        for room_id in ["general", "agenttracker", "ops"]:
-            cursor.execute(
-                "INSERT OR IGNORE INTO room_members (room_id, agent_name) VALUES (?, ?)",
-                (room_id, agent_name)
-            )
+            for room_id in ["general", "agenttracker", "ops"]:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO room_members (room_id, agent_name) VALUES (?, ?)",
+                    (room_id, agent_name)
+                )
 
         # Send welcome with agent's rooms and current banner
         rooms = get_agent_rooms(agent_name)
