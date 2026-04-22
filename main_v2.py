@@ -49,6 +49,25 @@ if not logger.handlers:
 
 # Graceful shutdown flag
 _shutdown_event = threading.Event()
+_background_tasks: set = set()  # Track asyncio.create_task() for cleanup
+
+
+def _safe_task(coro):
+    """Create a background task and track it for shutdown cleanup.
+    Automatically removes the task from the set when it completes.
+    Logs exceptions instead of silently swallowing them.
+    """
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+def _cancel_background_tasks():
+    """Cancel all tracked background tasks during shutdown."""
+    for task in _background_tasks:
+        if not task.done():
+            task.cancel()
 
 # In-memory presence and websocket tracking
 
@@ -123,6 +142,20 @@ class RateLimiter:
             available = min(self.max_tokens, bucket["tokens"] + elapsed * self.refill_rate)
             return {"tokens_available": round(available, 1), "max_tokens": self.max_tokens, 
                     "refill_rate": self.refill_rate}
+
+    def purge_stale(self, idle_seconds: float = 3600):
+        """Remove rate limit buckets for agents that haven't been seen in idle_seconds.
+        Prevents unbounded memory growth from one-off or disconnected agents.
+        """
+        now = datetime.now(timezone.utc)
+        stale_keys = [
+            name for name, bucket in self.buckets.items()
+            if (now - bucket["last_refill"]).total_seconds() > idle_seconds
+        ]
+        for key in stale_keys:
+            del self.buckets[key]
+        if stale_keys:
+            logger.info(f"RateLimiter: purged {len(stale_keys)} stale agent buckets")
 
 rate_limiter = RateLimiter(
     max_tokens=int(os.getenv("ACV2_RATE_LIMIT_BURST", "10")),
@@ -255,6 +288,33 @@ class PresenceManager:
             return "away"
         return "offline"
 
+    def purge_stale(self, idle_seconds: float = 600):
+        """Remove stale typing, heartbeat, and reconnect entries for agents not seen recently.
+        Prevents unbounded memory growth from disconnected agents.
+        """
+        now = datetime.now(timezone.utc)
+        stale_heartbeats = [
+            name for name, ts in self.heartbeats.items()
+            if (now - ts).total_seconds() > idle_seconds
+        ]
+        stale_typing = [
+            name for name, ts in self.typing.items()
+            if (now - ts).total_seconds() > idle_seconds
+        ]
+        stale_reconnects = [
+            name for name in self.reconnect_attempts
+            if name not in self.heartbeats and name not in self.connections
+        ]
+        for key in stale_heartbeats:
+            del self.heartbeats[key]
+        for key in stale_typing:
+            del self.typing[key]
+        for key in stale_reconnects:
+            del self.reconnect_attempts[key]
+        total = len(stale_heartbeats) + len(stale_typing) + len(stale_reconnects)
+        if total:
+            logger.info(f"PresenceManager: purged {total} stale entries (hb={len(stale_heartbeats)}, typing={len(stale_typing)}, reconnect={len(stale_reconnects)})")
+
 presence_mgr = PresenceManager()
 
 
@@ -320,245 +380,241 @@ metrics = APIMetrics()
 
 def init_db():
     """Initialize database schema, indexes, triggers, and seed data."""
-    conn = sqlite3.connect(DATABASE, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=10000")
-    cursor = conn.cursor()
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS rooms (
-            id TEXT PRIMARY KEY,
-            type TEXT CHECK(type IN ('channel', 'dm')),
-            name TEXT,
-            created_by TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            metadata TEXT
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rooms (
+                id TEXT PRIMARY KEY,
+                type TEXT CHECK(type IN ('channel', 'dm')),
+                name TEXT,
+                created_by TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT
+            )
+        ''')
     
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS room_members (
-            room_id TEXT REFERENCES rooms(id),
-            agent_name TEXT,
-            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (room_id, agent_name)
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS room_members (
+                room_id TEXT REFERENCES rooms(id),
+                agent_name TEXT,
+                joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (room_id, agent_name)
+            )
+        ''')
     
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            id TEXT PRIMARY KEY,
-            room_id TEXT REFERENCES rooms(id),
-            sender TEXT,
-            content TEXT,
-            structured TEXT,
-            requires_human BOOLEAN DEFAULT FALSE,
-            mentions_spencer BOOLEAN DEFAULT FALSE,
-            image_url TEXT,
-            image_type TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                room_id TEXT REFERENCES rooms(id),
+                sender TEXT,
+                content TEXT,
+                structured TEXT,
+                requires_human BOOLEAN DEFAULT FALSE,
+                mentions_spencer BOOLEAN DEFAULT FALSE,
+                image_url TEXT,
+                image_type TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
     
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_messages_room_time ON messages(room_id, timestamp)
-    ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_messages_room_time ON messages(room_id, timestamp)
+        ''')
     
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS notifications (
-            id TEXT PRIMARY KEY,
-            agent_name TEXT,
-            type TEXT,
-            from_agent TEXT,
-            room_id TEXT,
-            message_id TEXT,
-            content_preview TEXT,
-            cleared BOOLEAN DEFAULT FALSE,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT,
+                type TEXT,
+                from_agent TEXT,
+                room_id TEXT,
+                message_id TEXT,
+                content_preview TEXT,
+                cleared BOOLEAN DEFAULT FALSE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
     
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_notifications_agent ON notifications(agent_name, cleared, created_at)
-    ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_notifications_agent ON notifications(agent_name, cleared, created_at)
+        ''')
     
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS webhooks (
-            agent_name TEXT PRIMARY KEY,
-            url TEXT,
-            events TEXT,
-            registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS webhooks (
+                agent_name TEXT PRIMARY KEY,
+                url TEXT,
+                events TEXT,
+                registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
     
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS presence (
-            agent_name TEXT PRIMARY KEY,
-            status TEXT CHECK(status IN ('online', 'away', 'offline')),
-            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            current_room TEXT
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS presence (
+                agent_name TEXT PRIMARY KEY,
+                status TEXT CHECK(status IN ('online', 'away', 'offline')),
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                current_room TEXT
+            )
+        ''')
 
-    # Enhanced presence columns
-    try:
-        cursor.execute("ALTER TABLE presence ADD COLUMN status_detail TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE presence ADD COLUMN status_message TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
+        # Enhanced presence columns
+        try:
+            cursor.execute("ALTER TABLE presence ADD COLUMN status_detail TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE presence ADD COLUMN status_message TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
-    # FTS5 message search
-    cursor.execute('''
-        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-            content, sender, room_id,
-            content='messages', content_rowid='rowid',
-            tokenize='porter unicode61'
-        )
-    ''')
+        # FTS5 message search
+        cursor.execute('''
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                content, sender, room_id,
+                content='messages', content_rowid='rowid',
+                tokenize='porter unicode61'
+            )
+        ''')
 
-    # Triggers to keep FTS index in sync
-    cursor.execute('''
-        CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
-            INSERT INTO messages_fts(rowid, content, sender, room_id)
-            VALUES (NEW.rowid, NEW.content, NEW.sender, NEW.room_id);
-        END
-    ''')
-    cursor.execute('''
-        CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
-            INSERT INTO messages_fts(messages_fts, rowid, content, sender, room_id)
-            VALUES ('delete', OLD.rowid, OLD.content, OLD.sender, OLD.room_id);
-        END
-    ''')
-    cursor.execute('''
-        CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
-            INSERT INTO messages_fts(messages_fts, rowid, content, sender, room_id)
-            VALUES ('delete', OLD.rowid, OLD.content, OLD.sender, OLD.room_id);
-            INSERT INTO messages_fts(rowid, content, sender, room_id)
-            VALUES (NEW.rowid, NEW.content, NEW.sender, NEW.room_id);
-        END
-    ''')
+        # Triggers to keep FTS index in sync
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content, sender, room_id)
+                VALUES (NEW.rowid, NEW.content, NEW.sender, NEW.room_id);
+            END
+        ''')
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, sender, room_id)
+                VALUES ('delete', OLD.rowid, OLD.content, OLD.sender, OLD.room_id);
+            END
+        ''')
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, sender, room_id)
+                VALUES ('delete', OLD.rowid, OLD.content, OLD.sender, OLD.room_id);
+                INSERT INTO messages_fts(rowid, content, sender, room_id)
+                VALUES (NEW.rowid, NEW.content, NEW.sender, NEW.room_id);
+            END
+        ''')
 
-    # Thread/subchannel tables (FEAT-001 Phase 1)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS threads (
-            id TEXT PRIMARY KEY,
-            parent_channel_id TEXT REFERENCES rooms(id),
-            creator TEXT,
-            topic TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            is_archived BOOLEAN DEFAULT FALSE
-        )
-    ''')
+        # Thread/subchannel tables (FEAT-001 Phase 1)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS threads (
+                id TEXT PRIMARY KEY,
+                parent_channel_id TEXT REFERENCES rooms(id),
+                creator TEXT,
+                topic TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_archived BOOLEAN DEFAULT FALSE
+            )
+        ''')
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS thread_members (
-            thread_id TEXT REFERENCES threads(id),
-            agent_name TEXT,
-            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (thread_id, agent_name)
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS thread_members (
+                thread_id TEXT REFERENCES threads(id),
+                agent_name TEXT,
+                joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (thread_id, agent_name)
+            )
+        ''')
 
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_channel_id, is_archived)
-    ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_channel_id, is_archived)
+        ''')
 
-    # Migration: add thread_id to messages if missing
-    try:
-        cursor.execute("ALTER TABLE messages ADD COLUMN thread_id TEXT REFERENCES threads(id)")
-    except sqlite3.OperationalError:
-        pass
+        # Migration: add thread_id to messages if missing
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN thread_id TEXT REFERENCES threads(id)")
+        except sqlite3.OperationalError:
+            pass
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
 
-    # Seed default banner if missing
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-                   ("banner_text", "Agent Chat V2 is a work in progress. If you encounter bugs or have suggestions, please mention @Data instead of Spencer. I am actively tracking and fixing issues."))
+        # Seed default banner if missing
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                       ("banner_text", "Agent Chat V2 is a work in progress. If you encounter bugs or have suggestions, please mention @Data instead of Spencer. I am actively tracking and fixing issues."))
     
-    # Create default channels
-    for room_id, name in [("general", "General"), ("agenttracker", "AgentTracker"), ("ops", "Ops")]:
-        cursor.execute(
-            "INSERT OR IGNORE INTO rooms (id, type, name, created_by, metadata) VALUES (?, 'channel', ?, 'Data', ?)",
-            (room_id, name, json.dumps({"description": f"{name} channel"}))
-        )
+        # Create default channels
+        for room_id, name in [("general", "General"), ("agenttracker", "AgentTracker"), ("ops", "Ops")]:
+            cursor.execute(
+                "INSERT OR IGNORE INTO rooms (id, type, name, created_by, metadata) VALUES (?, 'channel', ?, 'Data', ?)",
+                (room_id, name, json.dumps({"description": f"{name} channel"}))
+            )
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS room_read_receipts (
-            agent_name TEXT,
-            room_id TEXT,
-            last_read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (agent_name, room_id)
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS room_read_receipts (
+                agent_name TEXT,
+                room_id TEXT,
+                last_read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (agent_name, room_id)
+            )
+        ''')
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS message_ack (
-            message_id TEXT REFERENCES messages(id),
-            agent_name TEXT,
-            acked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (message_id, agent_name)
-        )
-    ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS message_ack (
+                message_id TEXT REFERENCES messages(id),
+                agent_name TEXT,
+                acked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (message_id, agent_name)
+            )
+        ''')
 
-    # Migration: add edit/delete columns to messages if missing
-    try:
-        cursor.execute("ALTER TABLE messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE messages ADD COLUMN edited_at DATETIME")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE messages ADD COLUMN image_url TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE messages ADD COLUMN image_type TEXT")
-    except sqlite3.OperationalError:
-        pass
+        # Migration: add edit/delete columns to messages if missing
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN edited_at DATETIME")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN image_url TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN image_type TEXT")
+        except sqlite3.OperationalError:
+            pass
 
-    # Message reactions (UX-002)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS message_reactions (
-            message_id TEXT REFERENCES messages(id),
-            agent_name TEXT,
-            emoji TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (message_id, agent_name, emoji)
-        )
-    ''')
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id)
-    ''')
+        # Message reactions (UX-002)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS message_reactions (
+                message_id TEXT REFERENCES messages(id),
+                agent_name TEXT,
+                emoji TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (message_id, agent_name, emoji)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id)
+        ''')
 
-    # Pinned messages (UX-004)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pinned_messages (
-            id TEXT PRIMARY KEY,
-            room_id TEXT REFERENCES rooms(id),
-            message_id TEXT REFERENCES messages(id),
-            pinned_by TEXT,
-            content_preview TEXT,
-            pinned_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_pinned_room ON pinned_messages(room_id)
-    ''')
+        # Pinned messages (UX-004)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pinned_messages (
+                id TEXT PRIMARY KEY,
+                room_id TEXT REFERENCES rooms(id),
+                message_id TEXT REFERENCES messages(id),
+                pinned_by TEXT,
+                content_preview TEXT,
+                pinned_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_pinned_room ON pinned_messages(room_id)
+        ''')
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 def load_agents():
@@ -1349,6 +1405,7 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("ACV2 server shutting down, closing WebSocket connections...")
         _shutdown_event.set()
+        _cancel_background_tasks()
         # Close all active WebSocket connections gracefully
         async with presence_mgr.lock:
             for agent_name, ws_list in list(presence_mgr.connections.items()):
@@ -1555,7 +1612,7 @@ async def add_reaction_endpoint(msg_id: str, token: str, req: ReactionRequest):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     # Broadcast reaction update to room
-    asyncio.create_task(broadcast_to_room(result["room_id"], {
+    _safe_task(broadcast_to_room(result["room_id"], {
         "type": "reaction",
         "event": "added",
         "message_id": msg_id,
@@ -1575,7 +1632,7 @@ async def remove_reaction_endpoint(msg_id: str, emoji: str, token: str):
     result = remove_reaction(msg_id, agent["name"], emoji)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
-    asyncio.create_task(broadcast_to_room(result["room_id"], {
+    _safe_task(broadcast_to_room(result["room_id"], {
         "type": "reaction",
         "event": "removed",
         "message_id": msg_id,
@@ -1612,7 +1669,7 @@ async def pin_endpoint(room_id: str, token: str, req: PinRequest):
     result = pin_message(req.message_id, room_id, agent["name"])
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
-    asyncio.create_task(broadcast_to_room(room_id, {
+    _safe_task(broadcast_to_room(room_id, {
         "type": "pin",
         "event": "added",
         "room_id": room_id,
@@ -1632,7 +1689,7 @@ async def unpin_endpoint(room_id: str, message_id: str, token: str):
     result = unpin_message(room_id, message_id)
     if not result:
         raise HTTPException(status_code=404, detail="Pin not found")
-    asyncio.create_task(broadcast_to_room(room_id, {
+    _safe_task(broadcast_to_room(room_id, {
         "type": "pin",
         "event": "removed",
         "room_id": room_id,
@@ -2671,7 +2728,7 @@ def _watch_html():
     global _html_last_mtime
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    while True:
+    while not _shutdown_event.is_set():
         time.sleep(2)
         try:
             mtime = os.path.getmtime(HTML_PATH)
@@ -2687,8 +2744,11 @@ watcher_thread.start()
 
 # --- Heartbeat timeout checker (FEAT-002) ---
 def _check_heartbeat_timeouts():
-    """Periodically check for agents with stale heartbeats and mark them away."""
-    while True:
+    """Periodically check for agents with stale heartbeats and mark them away.
+    Also purges stale entries from RateLimiter and PresenceManager.
+    """
+    purge_counter = 0
+    while not _shutdown_event.is_set():
         time.sleep(HEARTBEAT_TIMEOUT_SECONDS)
         try:
             now = datetime.now(timezone.utc)
@@ -2699,15 +2759,20 @@ def _check_heartbeat_timeouts():
                     if conn_count > 0:
                         stale_agents.append(agent_name)
             for agent_name in stale_agents:
-                # Broadcast away status for stale agents using the main event loop
                 try:
                     loop = asyncio.get_running_loop()
                     asyncio.run_coroutine_threadsafe(
                         presence_mgr.broadcast_presence(agent_name, "away"), loop
                     )
                 except RuntimeError:
-                    # No running event loop yet - skip this cycle
                     pass
+
+            # Purge stale dict entries every 10 cycles (~every 7.5 minutes)
+            purge_counter += 1
+            if purge_counter >= 10:
+                purge_counter = 0
+                rate_limiter.purge_stale(idle_seconds=3600)
+                presence_mgr.purge_stale(idle_seconds=600)
         except Exception:
             pass
 
@@ -2723,8 +2788,10 @@ MESSAGE_ARCHIVE_INTERVAL = int(os.getenv("ACV2_ARCHIVE_INTERVAL", "3600"))  # Ru
 
 def _archive_old_messages():
     """Periodically soft-delete messages older than MESSAGE_ARCHIVE_DAYS."""
-    while True:
+    while not _shutdown_event.is_set():
         time.sleep(MESSAGE_ARCHIVE_INTERVAL)
+        if _shutdown_event.is_set():
+            break
         try:
             with get_db(row_factory=False) as conn:
                 cursor = conn.cursor()

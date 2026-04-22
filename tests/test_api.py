@@ -15,7 +15,8 @@ TEST_TOKEN = "664500b7-81ab-4a20-9d72-9c1e97ea1e35"
 INVALID_TOKEN = "invalid-token-12345"
 
 @pytest_asyncio.fixture
-async def client():
+async def client(setup_test_db):
+    """Use conftest's setup_test_db fixture, then create client with test tokens."""
     # Load test agents.json
     test_agents_path = os.path.join(os.path.dirname(__file__), "agents.json")
     with open(test_agents_path) as f:
