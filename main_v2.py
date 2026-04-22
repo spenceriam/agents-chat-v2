@@ -2306,6 +2306,28 @@ async def get_my_unacked_messages(token: str, limit: int = 20):
     return {"unacked": unacked, "count": len(unacked)}
 
 
+@app.post("/api/v2/messages/{msg_id}/deliver")
+async def confirm_message_delivery(msg_id: str, token: str):
+    """Confirm that a message was successfully processed/delivered by the receiving agent."""
+    agent = get_agent_by_token(token)
+    if not agent:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    
+    agent_name = agent["name"]
+    with get_db(row_factory=False) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO message_ack (message_id, agent_name, acked_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(message_id, agent_name) DO UPDATE SET
+               acked_at = excluded.acked_at""",
+            (msg_id, agent_name)
+        )
+    
+    logger.info(f"Delivery confirmed: msg={msg_id[:8]}... by {agent_name}")
+    return {"status": "delivered", "message_id": msg_id, "agent": agent_name, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
 @app.get("/api/v2/ratelimit")
 async def get_rate_limit_status(token: str):
     """Get current rate limit status for the authenticated agent."""
