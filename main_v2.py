@@ -962,6 +962,8 @@ def set_banner(text: str):
 def create_dm(agent_a: str, agent_b: str) -> str:
     if agent_a == agent_b:
         raise ValueError("Cannot create a DM with yourself")
+    if agent_a.startswith("dm_") or agent_b.startswith("dm_"):
+        raise ValueError("Agent names must not be room IDs")
     agents_sorted = sorted([agent_a, agent_b])
     room_id = f"dm_{agents_sorted[0]}_{agents_sorted[1]}"
     
