@@ -75,11 +75,12 @@ def _cancel_background_tasks():
 def get_db(row_factory: bool = True):
     """Context manager for SQLite connections. Ensures connections are always closed.
     Enables WAL mode, foreign keys, and performance PRAGMAs on each connection.
+    Automatically commits on success, rolls back on exception.
 
     Usage:
         with get_db() as conn:
             conn.execute("SELECT ...")
-        # conn automatically closed
+        # conn automatically committed and closed
 
         with get_db(row_factory=False) as conn:
             conn.execute("SELECT ...")
@@ -97,6 +98,7 @@ def get_db(row_factory: bool = True):
         if row_factory:
             conn.row_factory = sqlite3.Row
         yield conn
+        conn.commit()  # Commit on success
 
     except Exception:
         conn.rollback()
@@ -761,27 +763,27 @@ def add_reaction(message_id: str, agent_name: str, emoji: str) -> dict:
         return {"error": f"Emoji not in allowed set: {emoji}"}
     with get_db(row_factory=False) as conn:
         cursor = conn.cursor()
-    # Check message exists
-    cursor.execute("SELECT room_id FROM messages WHERE id = ?", (message_id,))
-    row = cursor.fetchone()
-    if not row:
-
-        return {"error": "Message not found"}
-    room_id = row[0]
-    cursor.execute(
-        "INSERT INTO message_reactions (message_id, agent_name, emoji) VALUES (?, ?, ?)\n           ON CONFLICT(message_id, agent_name, emoji) DO NOTHING",
-        (message_id, agent_name, emoji)
-    )
-
-    # Get updated reactions for this message
-    cursor.execute(
-        "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
-        (message_id,)
-    )
-    reactions = [{"emoji": r[0], "count": r[1], "agents": r[2].split(",")} for r in cursor.fetchall()]
-
-    return {"message_id": message_id, "room_id": room_id, "reactions": reactions}
-
+        # Check message exists
+        cursor.execute("SELECT room_id FROM messages WHERE id = ?", (message_id,))
+        row = cursor.fetchone()
+        if not row:
+    
+            return {"error": "Message not found"}
+        room_id = row[0]
+        cursor.execute(
+            "INSERT INTO message_reactions (message_id, agent_name, emoji) VALUES (?, ?, ?)\n           ON CONFLICT(message_id, agent_name, emoji) DO NOTHING",
+            (message_id, agent_name, emoji)
+        )
+    
+        # Get updated reactions for this message
+        cursor.execute(
+            "SELECT emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY count DESC",
+            (message_id,)
+        )
+        reactions = [{"emoji": r[0], "count": r[1], "agents": r[2].split(",")} for r in cursor.fetchall()]
+    
+        return {"message_id": message_id, "room_id": room_id, "reactions": reactions}
+    
 def remove_reaction(message_id: str, agent_name: str, emoji: str) -> dict:
     """Remove a reaction from a message."""
     with get_db(row_factory=False) as conn:
@@ -885,43 +887,43 @@ def search_messages(query: str, room_id: str = None, sender: str = None, limit: 
     with get_db() as conn:
         cursor = conn.cursor()
     
-    # Build FTS query with optional filters
-    fts_conditions = []
-    params = []
+        # Build FTS query with optional filters
+        fts_conditions = []
+        params = []
     
-    if room_id:
-        fts_conditions.append("room_id = ?")
-        params.append(room_id)
-    if sender:
-        fts_conditions.append("sender = ?")
-        params.append(sender)
+        if room_id:
+            fts_conditions.append("room_id = ?")
+            params.append(room_id)
+        if sender:
+            fts_conditions.append("sender = ?")
+            params.append(sender)
     
-    where_clause = " AND ".join(fts_conditions) if fts_conditions else "1=1"
-    params.append(query)
-    params.append(limit)
+        where_clause = " AND ".join(fts_conditions) if fts_conditions else "1=1"
+        params.append(query)
+        params.append(limit)
     
-    # FTS5 search with bm25 ranking
-    cursor.execute(
-        f"""SELECT m.id, m.room_id, m.sender, m.content, m.structured, m.timestamp, m.thread_id,
-                   m.is_deleted, m.edited_at,
-                   rank
-            FROM messages_fts f
-            JOIN messages m ON m.rowid = f.rowid
-            WHERE messages_fts MATCH ? AND {where_clause} AND m.is_deleted = FALSE
-            ORDER BY rank
-            LIMIT ?""",
-        params
-    )
-    results = []
-    for row in cursor.fetchall():
-        msg = dict(row)
-        if msg.get("structured"):
-            msg["structured"] = json.loads(msg["structured"])
-        results.append(msg)
-
-    return results
-
-
+        # FTS5 search with bm25 ranking
+        cursor.execute(
+            f"""SELECT m.id, m.room_id, m.sender, m.content, m.structured, m.timestamp, m.thread_id,
+                       m.is_deleted, m.edited_at,
+                       rank
+                FROM messages_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE messages_fts MATCH ? AND {where_clause} AND m.is_deleted = FALSE
+                ORDER BY rank
+                LIMIT ?""",
+            params
+        )
+        results = []
+        for row in cursor.fetchall():
+            msg = dict(row)
+            if msg.get("structured"):
+                msg["structured"] = json.loads(msg["structured"])
+            results.append(msg)
+    
+        return results
+    
+    
 def get_unread_counts(agent_name: str) -> Dict[str, int]:
     with get_db(row_factory=False) as conn:
         cursor = conn.cursor()
@@ -1013,21 +1015,21 @@ def create_thread(channel_id: str, creator: str, topic: str) -> dict:
 def list_threads(channel_id: str, include_archived: bool = False) -> list:
     with get_db() as conn:
         cursor = conn.cursor()
-    af = "" if include_archived else "AND t.is_archived = FALSE"
-    cursor.execute(
-        "SELECT t.*, "
-        "(SELECT COUNT(*) FROM thread_members tm WHERE tm.thread_id = t.id) as member_count, "
-        "(SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) as message_count, "
-        "(SELECT MAX(timestamp) FROM messages m WHERE m.thread_id = t.id) as last_message_at "
-        "FROM threads t WHERE t.parent_channel_id = ? " + af +
-        " ORDER BY t.created_at DESC",
-        (channel_id,)
-    )
-    threads = [dict(r) for r in cursor.fetchall()]
-
-    return threads
-
-
+        af = "" if include_archived else "AND t.is_archived = FALSE"
+        cursor.execute(
+            "SELECT t.*, "
+            "(SELECT COUNT(*) FROM thread_members tm WHERE tm.thread_id = t.id) as member_count, "
+            "(SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) as message_count, "
+            "(SELECT MAX(timestamp) FROM messages m WHERE m.thread_id = t.id) as last_message_at "
+            "FROM threads t WHERE t.parent_channel_id = ? " + af +
+            " ORDER BY t.created_at DESC",
+            (channel_id,)
+        )
+        threads = [dict(r) for r in cursor.fetchall()]
+    
+        return threads
+    
+    
 def get_thread(thread_id: str) -> dict | None:
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1046,15 +1048,15 @@ def get_thread(thread_id: str) -> dict | None:
 def join_thread(thread_id: str, agent_name: str) -> bool:
     with get_db(row_factory=False) as conn:
         cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO thread_members (thread_id, agent_name) VALUES (?, ?)", (thread_id, agent_name))
-
-        return True
-    except Exception:
-
-        return False
-
-
+        try:
+            cursor.execute("INSERT INTO thread_members (thread_id, agent_name) VALUES (?, ?)", (thread_id, agent_name))
+    
+            return True
+        except Exception:
+    
+            return False
+    
+    
 def archive_thread(thread_id: str) -> bool:
     with get_db(row_factory=False) as conn:
         cursor = conn.cursor()
@@ -1076,28 +1078,28 @@ def update_thread_topic(thread_id: str, topic: str) -> bool:
 def get_thread_messages(thread_id: str, limit: int = 50, before_id: str = None) -> list:
     with get_db() as conn:
         cursor = conn.cursor()
-    if before_id:
-        cursor.execute(
-            "SELECT * FROM messages WHERE thread_id = ? AND timestamp < "
-            "(SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp DESC LIMIT ?",
-            (thread_id, before_id, limit)
-        )
-    else:
-        cursor.execute(
-            "SELECT * FROM messages WHERE thread_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (thread_id, limit)
-        )
-    rows = cursor.fetchall()
-
-    messages = []
-    for row in reversed(rows):
-        msg = dict(row)
-        if msg.get("structured"):
-            msg["structured"] = json.loads(msg["structured"])
-        messages.append(msg)
-    return messages
-
-
+        if before_id:
+            cursor.execute(
+                "SELECT * FROM messages WHERE thread_id = ? AND timestamp < "
+                "(SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp DESC LIMIT ?",
+                (thread_id, before_id, limit)
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM messages WHERE thread_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (thread_id, limit)
+            )
+        rows = cursor.fetchall()
+    
+        messages = []
+        for row in reversed(rows):
+            msg = dict(row)
+            if msg.get("structured"):
+                msg["structured"] = json.loads(msg["structured"])
+            messages.append(msg)
+        return messages
+    
+    
 def save_thread_message(thread_id: str, room_id: str, sender: str, content: str,
                         structured: dict = None, requires_human: bool = False,
                         mentions_spencer: bool = False,
@@ -1134,64 +1136,81 @@ def save_message(room_id: str, sender: str, content: str, structured: dict = Non
         )
 
         # Create notifications for message
-        create_notifications_for_message(msg_id, room_id, sender, content, mentions_spencer)
+        create_notifications_for_message(msg_id, room_id, sender, content, mentions_spencer, conn)
         metrics.record_message()
         return msg_id
 
 
-def create_notifications_for_message(message_id: str, room_id: str, sender: str, content: str, mentions_spencer: bool):
-    with get_db() as conn:
-        cursor = conn.cursor()
-    
-    # Get room info
-    cursor.execute("SELECT type, name FROM rooms WHERE id = ?", (room_id,))
-    room = cursor.fetchone()
-    if not room:
+def create_notifications_for_message(message_id: str, room_id: str, sender: str, content: str, mentions_spencer: bool, conn: sqlite3.Connection = None):
+    """Create notification records for a new message.
+    If conn is provided (caller is already in a transaction), use it.
+    Otherwise opens its own connection."""
+    own_conn = conn is None
+    if own_conn:
+        conn = sqlite3.connect(DATABASE, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=10000")
+    cursor = conn.cursor()
 
-        return
-    
-    room_type = room["type"]
-    
-    # For DMs, notify the other participant
-    if room_type == "dm":
-        cursor.execute("SELECT agent_name FROM room_members WHERE room_id = ? AND agent_name != ?", (room_id, sender))
-        for row in cursor.fetchall():
-            recipient = row["agent_name"]
-            notif_id = str(uuid.uuid4())
-            cursor.execute(
-                """INSERT INTO notifications (id, agent_name, type, from_agent, room_id, message_id, content_preview)
-                   VALUES (?, ?, 'dm', ?, ?, ?, ?)""",
-                (notif_id, recipient, sender, room_id, message_id, content[:200])
-            )
-    
-    # For @Spencer mentions
-    if mentions_spencer:
-        notif_id = str(uuid.uuid4())
-        cursor.execute(
-            """INSERT INTO notifications (id, agent_name, type, from_agent, room_id, message_id, content_preview)
-               VALUES (?, ?, 'mention', ?, ?, ?, ?)""",
-            (notif_id, "Spencer", sender, room_id, message_id, content[:200])
-        )
-    
-    # For @mentions in channels
-    if room_type == "channel":
-        # Simple @ detection
-        import re
-        mentions = re.findall(r'@(\w+)', content)
-        for mentioned in mentions:
-            if mentioned == sender or mentioned == "Spencer":
-                continue
-            cursor.execute(
-                "SELECT 1 FROM room_members WHERE room_id = ? AND agent_name = ?",
-                (room_id, mentioned)
-            )
-            if cursor.fetchone():
+    try:
+        # Get room info
+        cursor.execute("SELECT type, name FROM rooms WHERE id = ?", (room_id,))
+        room = cursor.fetchone()
+        if not room:
+            return
+
+        # Handle both dict-like rows and tuples
+        room_type = room[0]
+        room_name = room[1]
+
+        # For DMs, notify the other participant
+        if room_type == "dm":
+            cursor.execute("SELECT agent_name FROM room_members WHERE room_id = ? AND agent_name != ?", (room_id, sender))
+            for row in cursor.fetchall():
+                recipient = row[0]
                 notif_id = str(uuid.uuid4())
                 cursor.execute(
                     """INSERT INTO notifications (id, agent_name, type, from_agent, room_id, message_id, content_preview)
-                       VALUES (?, ?, 'mention', ?, ?, ?, ?)""",
-                    (notif_id, mentioned, sender, room_id, message_id, content[:200])
+                       VALUES (?, ?, 'dm', ?, ?, ?, ?)""",
+                    (notif_id, recipient, sender, room_id, message_id, content[:200])
                 )
+
+        # For @Spencer mentions
+        if mentions_spencer:
+            notif_id = str(uuid.uuid4())
+            cursor.execute(
+                """INSERT INTO notifications (id, agent_name, type, from_agent, room_id, message_id, content_preview)
+                   VALUES (?, ?, 'mention', ?, ?, ?, ?)""",
+                (notif_id, "Spencer", sender, room_id, message_id, content[:200])
+            )
+
+        # For @mentions in channels
+        if room_type == "channel":
+            import re
+            mentions = re.findall(r'@(\w+)', content)
+            for mentioned in mentions:
+                if mentioned == sender or mentioned == "Spencer":
+                    continue
+                cursor.execute(
+                    "SELECT 1 FROM room_members WHERE room_id = ? AND agent_name = ?",
+                    (room_id, mentioned)
+                )
+                if cursor.fetchone():
+                    notif_id = str(uuid.uuid4())
+                    cursor.execute(
+                        """INSERT INTO notifications (id, agent_name, type, from_agent, room_id, message_id, content_preview)
+                           VALUES (?, ?, 'mention', ?, ?, ?, ?)""",
+                        (notif_id, mentioned, sender, room_id, message_id, content[:200])
+                    )
+    finally:
+        if own_conn:
+            try:
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            finally:
+                conn.close()
 
 async def notify_mentions_ws(room_id: str, sender: str, content: str, message_id: str):
     """Send real-time WebSocket notifications to mentioned agents."""
@@ -1242,49 +1261,49 @@ def get_room_messages(room_id: str, limit: int = 50, before_id: str = None) -> L
     with get_db() as conn:
         cursor = conn.cursor()
 
-    if before_id:
-        cursor.execute(
-            """SELECT * FROM messages WHERE room_id = ? AND timestamp <
-               (SELECT timestamp FROM messages WHERE id = ?)
-               ORDER BY timestamp DESC LIMIT ?""",
-            (room_id, before_id, limit)
-        )
-    else:
-        cursor.execute(
-            """SELECT * FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT ?""",
-            (room_id, limit)
-        )
-
-    rows = cursor.fetchall()
-    messages = []
-    for row in reversed(rows):
-        msg = dict(row)
-        if msg.get("structured"):
-            msg["structured"] = json.loads(msg["structured"])
-        msg["reactions"] = []
-        messages.append(msg)
-
-    # Batch load reactions for all messages in a single query (fixes N+1)
-    if messages:
-        msg_ids = [m["id"] for m in messages]
-        placeholders = ",".join("?" * len(msg_ids))
-        cursor.execute(
-            f"SELECT message_id, emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents "
-            f"FROM message_reactions WHERE message_id IN ({placeholders}) "
-            f"GROUP BY message_id, emoji ORDER BY count DESC",
-            msg_ids
-        )
-        reactions_by_msg: Dict[str, list] = {}
-        for r in cursor.fetchall():
-            reactions_by_msg.setdefault(r["message_id"], []).append(
-                {"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")}
+        if before_id:
+            cursor.execute(
+                """SELECT * FROM messages WHERE room_id = ? AND timestamp <
+                   (SELECT timestamp FROM messages WHERE id = ?)
+                   ORDER BY timestamp DESC LIMIT ?""",
+                (room_id, before_id, limit)
             )
-        for msg in messages:
-            msg["reactions"] = reactions_by_msg.get(msg["id"], [])
-
-    return messages
-
-
+        else:
+            cursor.execute(
+                """SELECT * FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT ?""",
+                (room_id, limit)
+            )
+    
+        rows = cursor.fetchall()
+        messages = []
+        for row in reversed(rows):
+            msg = dict(row)
+            if msg.get("structured"):
+                msg["structured"] = json.loads(msg["structured"])
+            msg["reactions"] = []
+            messages.append(msg)
+    
+        # Batch load reactions for all messages in a single query (fixes N+1)
+        if messages:
+            msg_ids = [m["id"] for m in messages]
+            placeholders = ",".join("?" * len(msg_ids))
+            cursor.execute(
+                f"SELECT message_id, emoji, COUNT(*) as count, GROUP_CONCAT(agent_name) as agents "
+                f"FROM message_reactions WHERE message_id IN ({placeholders}) "
+                f"GROUP BY message_id, emoji ORDER BY count DESC",
+                msg_ids
+            )
+            reactions_by_msg: Dict[str, list] = {}
+            for r in cursor.fetchall():
+                reactions_by_msg.setdefault(r["message_id"], []).append(
+                    {"emoji": r["emoji"], "count": r["count"], "agents": r["agents"].split(",")}
+                )
+            for msg in messages:
+                msg["reactions"] = reactions_by_msg.get(msg["id"], [])
+    
+        return messages
+    
+    
 def get_notifications(agent_name: str, cleared: bool = False) -> List[dict]:
     with get_db() as conn:
         cursor = conn.cursor()

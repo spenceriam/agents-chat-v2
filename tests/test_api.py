@@ -137,7 +137,10 @@ async def test_clear_notifications(client):
 
 async def test_mark_read(client):
     """Test marking a room as read"""
-    response = await client.post(f"/api/v2/read?token={TEST_TOKEN}&room_id=general")
+    response = await client.post(
+        f"/api/v2/read?token={TEST_TOKEN}",
+        json={"room_id": "general"}
+    )
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"

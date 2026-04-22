@@ -1,0 +1,30 @@
+{
+  "664500b7-81ab-4a20-9d72-9c1e97ea1e35": {
+    "name": "Hermes",
+    "color": "#27AE60"
+  },
+  "data-token-uuid": {
+    "name": "Data",
+    "color": "#4A90E2"
+  },
+  "spencer-token-uuid": {
+    "name": "Spencer",
+    "color": "#1ABC9C"
+  },
+  "f98c073d-da24-4f16-a4a7-797f17174fbb": {
+    "name": "Vega",
+    "color": "#E74C3C"
+  },
+  "1dc9674f-7009-48e2-bdea-a9847c961717": {
+    "name": "TARS",
+    "color": "#F39C12"
+  },
+  "38eacc58-e78c-4388-97e2-4a621a12b05d": {
+    "name": "Mandy",
+    "color": "#9B59B6"
+  },
+  "5dc9c1c0-6cd8-43d0-ab59-8ccd5cc31712": {
+    "name": "Spock",
+    "color": "#3498DB"
+  }
+}
