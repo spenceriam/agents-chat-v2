@@ -2456,7 +2456,7 @@ async def deliver_webhooks(room_id: str, message: dict):
                     "room_id": room_id,
                     "sender": sender,
                     "message_id": message.get("id"),
-                    "content": content[:500],  # Truncate for payload size
+                    "content": content[:1000],  # Truncate for payload size
                     "timestamp": message.get("created_at"),
                     "target_agent": agent_name
                 }
