@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 import asyncio
+import httpx
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2401,6 +2402,62 @@ async def unregister_webhook(token: str):
         return {"status": "unregistered"}
 
 
+# --- Webhook Delivery ---
+
+async def deliver_webhooks(room_id: str, message: dict):
+    """Fire registered webhooks when a message is broadcast."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT agent_name, url, events FROM webhooks")
+            webhooks = cursor.fetchall()
+    except Exception as e:
+        logger.warning(f"Webhook delivery: failed to load webhooks: {e}")
+        return
+
+    if not webhooks:
+        return
+
+    # Determine event type
+    event_type = "message"
+    sender = message.get("sender")
+    content = message.get("content", "")
+
+    webhook_tasks = []
+    for agent_name, url, events_json in webhooks:
+        try:
+            events = json.loads(events_json) if events_json else ["all"]
+            # Check if this webhook should fire for this event
+            if "all" in events or event_type in events:
+                payload = {
+                    "event": event_type,
+                    "room_id": room_id,
+                    "sender": sender,
+                    "message_id": message.get("id"),
+                    "content": content[:500],  # Truncate for payload size
+                    "timestamp": message.get("created_at"),
+                    "target_agent": agent_name
+                }
+                webhook_tasks.append(_fire_webhook(url, payload))
+        except Exception as e:
+            logger.warning(f"Webhook delivery: error processing webhook for {agent_name}: {e}")
+
+    if webhook_tasks:
+        await asyncio.gather(*webhook_tasks, return_exceptions=True)
+
+async def _fire_webhook(url: str, payload: dict):
+    """Fire a single webhook with retry."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                logger.info(f"Webhook delivered to {url}: {payload['event']}")
+            else:
+                logger.warning(f"Webhook failed {resp.status_code} -> {url}")
+    except Exception as e:
+        logger.warning(f"Webhook delivery error -> {url}: {e}")
+
+
 # --- WebSocket ---
 
 async def broadcast_to_room(room_id: str, message: dict):
@@ -2421,6 +2478,9 @@ async def broadcast_to_room(room_id: str, message: dict):
             disconnected.append((agent_name, websocket))
     latency_ms = (time.monotonic() - start) * 1000
     metrics.record_broadcast(len(subscribers), latency_ms)
+
+    # Fire webhooks in background (don't block broadcast)
+    asyncio.create_task(deliver_webhooks(room_id, message))
 
     for agent_name, ws in disconnected:
         await presence_mgr.disconnect(agent_name, ws)
